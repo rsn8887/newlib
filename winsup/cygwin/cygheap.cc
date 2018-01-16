@@ -1,8 +1,5 @@
 /* cygheap.cc: Cygwin heap manager.
 
-   Copyright 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
-   2011, 2012, 2013, 2014 Red Hat, Inc.
-
    This file is part of Cygwin.
 
    This software is a copyrighted work licensed under the terms of the
@@ -31,7 +28,7 @@
 
 static mini_cygheap NO_COPY cygheap_dummy =
 {
-  {__utf8_mbtowc, __utf8_wctomb}
+  {__utf8_mbtowc}
 };
 
 init_cygheap NO_COPY *cygheap = (init_cygheap *) &cygheap_dummy;
@@ -219,12 +216,6 @@ init_cygheap::init_installation_root ()
 				    installation_root)))
 	break;
     }
-
-  if (cygwin_props.disable_key)
-    {
-      installation_key.Length = 0;
-      installation_key.Buffer[0] = L'\0';
-    }
 }
 
 void __stdcall
@@ -254,8 +245,6 @@ cygheap_init ()
 	cygheap->bucket_val[b] = sz[b & 1];
       /* Default locale settings. */
       cygheap->locale.mbtowc = __utf8_mbtowc;
-      cygheap->locale.wctomb = __utf8_wctomb;
-      strcpy (cygheap->locale.charset, "UTF-8");
       /* Set umask to a sane default. */
       cygheap->umask = 022;
       cygheap->rlim_core = RLIM_INFINITY;
@@ -415,7 +404,6 @@ creturn (cygheap_types x, cygheap_entry * c, unsigned len, const char *fn = NULL
   char *cend = ((char *) c + sizeof (*c) + len);
   if (cygheap_max < cend)
     cygheap_max = cend;
-  MALLOC_CHECK;
   return (void *) c->data;
 }
 
@@ -423,7 +411,6 @@ inline static void *
 cmalloc (cygheap_types x, size_t n, const char *fn)
 {
   cygheap_entry *c;
-  MALLOC_CHECK;
   c = (cygheap_entry *) _cmalloc (sizeof_cygheap (n));
   return creturn (x, c, n, fn);
 }
@@ -443,7 +430,6 @@ cmalloc_abort (cygheap_types x, size_t n)
 inline static void *
 crealloc (void *s, size_t n, const char *fn)
 {
-  MALLOC_CHECK;
   if (s == NULL)
     return cmalloc (HEAP_STR, n);	// kludge
 
@@ -471,7 +457,6 @@ cfree (void *s)
 {
   assert (!inheap (s));
   _cfree (tocygheap (s));
-  MALLOC_CHECK;
 }
 
 extern "C" void __reg2
@@ -486,7 +471,6 @@ inline static void *
 ccalloc (cygheap_types x, size_t n, size_t size, const char *fn)
 {
   cygheap_entry *c;
-  MALLOC_CHECK;
   n *= size;
   c = (cygheap_entry *) _cmalloc (sizeof_cygheap (n));
   if (c)
@@ -509,48 +493,40 @@ ccalloc_abort (cygheap_types x, size_t n, size_t size)
 extern "C" PWCHAR __reg1
 cwcsdup (PCWSTR s)
 {
-  MALLOC_CHECK;
   PWCHAR p = (PWCHAR) cmalloc (HEAP_STR, (wcslen (s) + 1) * sizeof (WCHAR));
   if (!p)
     return NULL;
   wcpcpy (p, s);
-  MALLOC_CHECK;
   return p;
 }
 
 extern "C" PWCHAR __reg1
 cwcsdup1 (PCWSTR s)
 {
-  MALLOC_CHECK;
   PWCHAR p = (PWCHAR) cmalloc (HEAP_1_STR, (wcslen (s) + 1) * sizeof (WCHAR));
   if (!p)
     return NULL;
   wcpcpy (p, s);
-  MALLOC_CHECK;
   return p;
 }
 
 extern "C" char *__reg1
 cstrdup (const char *s)
 {
-  MALLOC_CHECK;
   char *p = (char *) cmalloc (HEAP_STR, strlen (s) + 1);
   if (!p)
     return NULL;
   strcpy (p, s);
-  MALLOC_CHECK;
   return p;
 }
 
 extern "C" char *__reg1
 cstrdup1 (const char *s)
 {
-  MALLOC_CHECK;
   char *p = (char *) cmalloc (HEAP_1_STR, strlen (s) + 1);
   if (!p)
     return NULL;
   strcpy (p, s);
-  MALLOC_CHECK;
   return p;
 }
 
@@ -743,4 +719,16 @@ init_cygheap::find_tls (int sig, bool& issig_wait)
   if (t)
     WaitForSingleObject (t->mutex, INFINITE);
   return t;
+}
+
+/* Called from profil.c to sample all non-main thread PC values for profiling */
+extern "C" void
+cygheap_profthr_all (void (*profthr_byhandle) (HANDLE))
+{
+  for (uint32_t ix = 0; ix < nthreads; ix++)
+    {
+      _cygtls *tls = cygheap->threadlist[ix].thread;
+      if (tls->tid)
+	profthr_byhandle (tls->tid->win32_obj_id);
+    }
 }

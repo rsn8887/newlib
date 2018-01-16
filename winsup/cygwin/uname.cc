@@ -1,7 +1,4 @@
 /* uname.cc
-
-   Copyright 1995, 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005,
-   2006, 2007, 2008, 2013, 2014, 2015 Red Hat, Inc.
    Written by Steve Chamberlain of Cygnus Support, sac@cygnus.com
    Rewritten by Geoffrey Noer of Cygnus Solutions, noer@cygnus.com
 
@@ -15,6 +12,8 @@ details. */
 #include <sys/utsname.h>
 #include "cygwin_version.h"
 #include "cygtls.h"
+
+extern "C" int cygwin_gethostname (char *__name, size_t __len);
 
 /* uname: POSIX 4.4.1.1 */
 extern "C" int

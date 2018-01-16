@@ -1,8 +1,5 @@
 /* grp.cc
 
-   Copyright 1996, 1997, 1998, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007,
-   2008, 2009, 2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
    Original stubs by Jason Molenda of Cygnus Support, crash@cygnus.com
    First implementation by Gunther Ebert, gunther.ebert@ixos-leipzig.de
 
@@ -48,8 +45,8 @@ pwdgrp::parse_group ()
   /* Don't generate gr_mem entries. */
   grp.g.gr_mem = &null_ptr;
   cygsid csid;
-  csid.getfromgr_passwd (&grp.g);
-  RtlCopySid (SECURITY_MAX_SID_SIZE, grp.sid, csid);
+  if (csid.getfromgr_passwd (&grp.g))
+    RtlCopySid (SECURITY_MAX_SID_SIZE, grp.sid, csid);
   return true;
 }
 
@@ -240,7 +237,7 @@ internal_getgrgid (gid_t gid, cyg_ldap *pldap)
   return NULL;
 }
 
-#ifndef __x86_64__
+#ifdef __i386__
 static struct __group16 *
 grp32togrp16 (struct __group16 *gp16, struct group *gp32)
 {
@@ -840,9 +837,7 @@ setgroups32 (int ngroups, const gid_t *grouplist)
   return 0;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (setgroups32, setgroups)
-#else
+#ifdef __i386__
 extern "C" int
 setgroups (int ngroups, const __gid16_t *grouplist)
 {
@@ -858,4 +853,6 @@ setgroups (int ngroups, const __gid16_t *grouplist)
     }
   return setgroups32 (ngroups, grouplist32);
 }
+#else
+EXPORT_ALIAS (setgroups32, setgroups)
 #endif

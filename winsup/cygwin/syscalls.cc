@@ -1,8 +1,5 @@
 /* syscalls.cc: syscalls
 
-   Copyright 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006,
-   2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -39,6 +36,7 @@ details. */
 #include <unistd.h>
 #include <sys/wait.h>
 #include <dirent.h>
+#include <ntsecapi.h>
 #include "ntdll.h"
 
 #undef fstat
@@ -63,6 +61,7 @@ details. */
 #include "tls_pbuf.h"
 #include "sync.h"
 #include "child_info.h"
+#include <cygwin/fs.h>  /* needed for RENAME_NOREPLACE */
 
 #undef _close
 #undef _lseek
@@ -219,18 +218,10 @@ stop_transaction (NTSTATUS status, HANDLE old_trans, HANDLE &trans)
   return status;
 }
 
-static char desktop_ini[] =
+static const char desktop_ini[] =
   "[.ShellClassInfo]\r\n"
-  "CLSID={645FF040-5081-101B-9F08-00AA002F954E}\r\n";
-
-static char desktop_ini_ext[] =
+  "CLSID={645FF040-5081-101B-9F08-00AA002F954E}\r\n"
   "LocalizedResourceName=@%SystemRoot%\\system32\\shell32.dll,-8964\r\n";
-
-static BYTE info2[] =
-{
-  0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x20, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-};
 
 enum bin_status
 {
@@ -277,13 +268,13 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
      them into the recycler. */
   if (pfni->FileNameLength == 2) /* root dir. */
     goto out;
-  /* The recycler name on Vista and later is $Recycler.Bin by default.  If the
-     recycler dir disappeared for some reason, the shell32.dll recreates the
-     directory in all upper case.  So, we never know beforehand if the dir
-     is written in mixed case or in all upper case.  That's a problem when
-     using casesensitivity.  If the file handle given to FileRenameInformation
+  /* The recycler name is $Recycler.Bin by default.  If the recycler dir
+     disappeared for some reason, the shell32.dll recreates the directory in
+     all upper case.  So, we never know beforehand if the dir is written in
+     mixed case or in all upper case.  That's a problem when using
+     casesensitivity.  If the file handle given to FileRenameInformation
      has been opened casesensitive, the call also handles the path to the
-     target dir casesensitive.  Rather then trying to find the right name
+     target dir casesensitive.  Rather than trying to find the right name
      of the recycler, we just reopen the file to move with OBJ_CASE_INSENSITIVE,
      so the subsequent FileRenameInformation works caseinsensitive in terms of
      the recycler directory name, too. */
@@ -306,14 +297,7 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
   RtlInitEmptyUnicodeString (&recycler, recyclerbuf, sizeof recyclerbuf);
   if (!pc.isremote ())
     {
-      if (wincap.has_recycle_dot_bin ()) /* NTFS and FAT since Vista, ReFS */
-	RtlAppendUnicodeToString (&recycler, L"\\$Recycle.Bin\\");
-      else if (pc.fs_is_ntfs ())	/* NTFS up to 2K3 */
-	RtlAppendUnicodeToString (&recycler, L"\\RECYCLER\\");
-      else if (pc.fs_is_fat ())	/* FAT up to 2K3 */
-	RtlAppendUnicodeToString (&recycler, L"\\Recycled\\");
-      else
-	goto out;
+      RtlAppendUnicodeToString (&recycler, L"\\$Recycle.Bin\\");
       RtlInitCountedUnicodeString(&fname, pfni->FileName, pfni->FileNameLength);
       /* Is the file a subdir of the recycler? */
       if (RtlEqualUnicodePathPrefix (&fname, &recycler, TRUE))
@@ -325,7 +309,7 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
       /* Is fname really a subcomponent of the full path?  If not, there's
 	 a high probability we're acessing the file via a virtual drive
 	 created with "subst".  Check and accommodate it.  Note that we
-	 ony get here if the virtual drive is really pointing to a local
+	 only get here if the virtual drive is really pointing to a local
 	 drive.  Otherwise pc.isremote () returns "true". */
       if (!RtlEqualUnicodePathSuffix (pc.get_nt_native_path (), &fname, TRUE))
 	{
@@ -405,13 +389,13 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
 		    "failed, status = %y", pc.get_nt_native_path (), status);
       goto out;
     }
-  RtlInt64ToHexUnicodeString (pfii->FileId.QuadPart, &recycler, TRUE);
+  RtlInt64ToHexUnicodeString (pfii->IndexNumber.QuadPart, &recycler, TRUE);
   RtlInt64ToHexUnicodeString (hash_path_name (0, pc.get_nt_native_path ()),
 			      &recycler, TRUE);
   /* Shoot. */
   pfri = (PFILE_RENAME_INFORMATION) infobuf;
   pfri->ReplaceIfExists = TRUE;
-  pfri->RootDirectory = pc.isremote () ? NULL : rootdir;
+  pfri->RootDirectory = rootdir;
   pfri->FileNameLength = recycler.Length;
   memcpy (pfri->FileName, recycler.Buffer, recycler.Length);
   frisiz = sizeof *pfri + pfri->FileNameLength - sizeof (WCHAR);
@@ -434,13 +418,9 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
 	}
       /* Then check if recycler exists by opening and potentially creating it.
 	 Yes, we can really do that.  Typically the recycle bin is created
-	 by the first user actually using the bin.  Pre-Vista, the permissions
-	 are the default permissions propagated from the root directory.
-	 Since Vista the top-level recycle dir has explicit permissions. */
+	 by the first user actually using the bin. */
       InitializeObjectAttributes (&attr, &recycler, OBJ_CASE_INSENSITIVE,
-				  rootdir,
-				  wincap.has_recycle_dot_bin ()
-				  ? recycler_sd (true, true) : NULL);
+				  rootdir, recycler_sd (true, true));
       recycler.Length = recycler_base_len;
       status = NtCreateFile (&recyclerdir,
 			     READ_CONTROL
@@ -478,9 +458,8 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
 	      goto out;
 	    }
 	}
-      /* The desktop.ini and INFO2 (pre-Vista) files are expected by
-	 Windows Explorer.  Otherwise, the created bin is treated as
-	 corrupted */
+      /* The desktop.ini file is expected by Windows Explorer.  Otherwise,
+         the created bin is treated as corrupted */
       if (io.Information == FILE_CREATED)
 	{
 	  RtlInitUnicodeString (&fname, L"desktop.ini");
@@ -496,43 +475,13 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
 			  &recycler, status);
 	  else
 	    {
-	      status = NtWriteFile (tmp_fh, NULL, NULL, NULL, &io, desktop_ini,
-				    sizeof desktop_ini - 1, NULL, NULL);
+	      status = NtWriteFile (tmp_fh, NULL, NULL, NULL, &io,
+				    (PVOID) desktop_ini, sizeof desktop_ini - 1,
+				    NULL, NULL);
 	      if (!NT_SUCCESS (status))
 		debug_printf ("NtWriteFile (%S) failed, status = %y",
 			      &fname, status);
-	      else if (wincap.has_recycle_dot_bin ())
-	      	{
-		  status = NtWriteFile (tmp_fh, NULL, NULL, NULL, &io,
-		  			desktop_ini_ext,
-					sizeof desktop_ini_ext - 1, NULL, NULL);
-		  if (!NT_SUCCESS (status))
-		    debug_printf ("NtWriteFile (%S) failed, status = %y",
-				  &fname, status);
-		}
 	      NtClose (tmp_fh);
-	    }
-	  if (!wincap.has_recycle_dot_bin ()) /* No INFO2 file since Vista */
-	    {
-	      RtlInitUnicodeString (&fname, L"INFO2");
-	      status = NtCreateFile (&tmp_fh, FILE_GENERIC_WRITE, &attr, &io,
-				     NULL, FILE_ATTRIBUTE_ARCHIVE
-					   | FILE_ATTRIBUTE_HIDDEN,
-				     FILE_SHARE_VALID_FLAGS, FILE_CREATE,
-				     FILE_SYNCHRONOUS_IO_NONALERT
-				     | FILE_NON_DIRECTORY_FILE, NULL, 0);
-		if (!NT_SUCCESS (status))
-		  debug_printf ("NtCreateFile (%S) failed, status = %y",
-				&recycler, status);
-		else
-		{
-		  status = NtWriteFile (tmp_fh, NULL, NULL, NULL, &io, info2,
-					sizeof info2, NULL, NULL);
-		  if (!NT_SUCCESS (status))
-		    debug_printf ("NtWriteFile (%S) failed, status = %y",
-				  &fname, status);
-		  NtClose (tmp_fh);
-		}
 	    }
 	}
       NtClose (recyclerdir);
@@ -553,8 +502,11 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
      Otherwise the below code closes the handle to allow replacing the file. */
   status = NtSetInformationFile (fh, &io, &disp, sizeof disp,
 				 FileDispositionInformation);
-  if (status == STATUS_DIRECTORY_NOT_EMPTY)
+  switch (status)
     {
+    case STATUS_SUCCESS:
+      break;
+    case STATUS_DIRECTORY_NOT_EMPTY:
       /* Uh oh!  This was supposed to be avoided by the check_dir_not_empty
 	 test in unlink_nt, but given that the test isn't atomic, this *can*
 	 happen.  Try to move the dir back ASAP. */
@@ -572,6 +524,36 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
 	  bin_stat = dir_not_empty;
 	  goto out;
 	}
+      debug_printf ("Renaming dir %S back to %S failed, status = %y",
+		    &recycler, pc.get_nt_native_path (), status);
+      break;
+    case STATUS_FILE_RENAMED:
+      /* On NFS, the subsequent request to set the delete disposition fails
+	 with STATUS_FILE_RENAMED.  We have to reopen the file, close the
+	 original handle, and set the delete disposition on the reopened
+	 handle to make sure setting delete disposition works. */
+      InitializeObjectAttributes (&attr, &ro_u_empty, 0, fh, NULL);
+      status = NtOpenFile (&tmp_fh, access, &attr, &io,
+			   FILE_SHARE_VALID_FLAGS, flags);
+      if (!NT_SUCCESS (status))
+	debug_printf ("NtOpenFile (%S) for reopening in renamed case failed, "
+		      "status = %y", pc.get_nt_native_path (), status);
+      else
+	{
+	  NtClose (fh);
+	  fh = tmp_fh;
+	  status = NtSetInformationFile (fh, &io, &disp, sizeof disp,
+					 FileDispositionInformation);
+	  if (!NT_SUCCESS (status))
+	    debug_printf ("Setting delete disposition %S (%S) in renamed "
+			  "case failed, status = %y",
+			  &recycler, pc.get_nt_native_path (), status);
+	}
+      break;
+    default:
+      debug_printf ("Setting delete disposition on %S (%S) failed, status = %y",
+		    &recycler, pc.get_nt_native_path (), status);
+      break;
     }
   /* In case of success, restore R/O attribute to accommodate hardlinks.
      That leaves potentially hardlinks around with the R/O bit suddenly
@@ -582,8 +564,8 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
   NtClose (fh);
   fh = NULL; /* So unlink_nt doesn't close the handle twice. */
   /* On success or when trying to unlink a directory we just return here.
-     The below code only works for files. */
-  if (NT_SUCCESS (status) || pc.isdir ())
+     The below code only works for files.  It also fails on NFS. */
+  if (NT_SUCCESS (status) || pc.isdir () || pc.fs_is_nfs ())
     goto out;
   /* The final trick.  We create a temporary file with delete-on-close
      semantic and rename that file to the file just moved to the bin.
@@ -592,15 +574,30 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
      delete-on-close on the original file succeeds.  There are still
      cases in which this fails, for instance, when trying to delete a
      hardlink to a DLL used by the unlinking application itself. */
-  RtlAppendUnicodeToString (&recycler, L"X");
-  InitializeObjectAttributes (&attr, &recycler, 0, rootdir, NULL);
+  if (pc.isremote ())
+    {
+      /* In the remote case we need the full path, but recycler is only
+	 a relative path.  Convert to absolute path. */
+      RtlInitEmptyUnicodeString (&fname, (PCWSTR) tp.w_get (),
+				 (NT_MAX_PATH - 1) * sizeof (WCHAR));
+      RtlCopyUnicodeString (&fname, pc.get_nt_native_path ());
+      RtlSplitUnicodePath (&fname, &fname, NULL);
+      /* Reset max length, overwritten by RtlSplitUnicodePath. */
+      fname.MaximumLength = (NT_MAX_PATH - 1) * sizeof (WCHAR); /* reset */
+      RtlAppendUnicodeStringToString (&fname, &recycler);
+    }
+  else
+    fname = recycler;
+  RtlAppendUnicodeToString (&fname, L"X");
+  InitializeObjectAttributes (&attr, &fname, 0, rootdir, NULL);
   status = NtCreateFile (&tmp_fh, DELETE, &attr, &io, NULL,
 			 FILE_ATTRIBUTE_NORMAL, 0, FILE_SUPERSEDE,
 			 FILE_NON_DIRECTORY_FILE | FILE_DELETE_ON_CLOSE,
 			 NULL, 0);
   if (!NT_SUCCESS (status))
     {
-      debug_printf ("Creating file for overwriting failed, status = %y",
+      debug_printf ("Creating file %S for overwriting %S (%S) failed, "
+		    "status = %y", &fname, &recycler, pc.get_nt_native_path (),
 		    status);
       goto out;
     }
@@ -608,7 +605,8 @@ try_to_bin (path_conv &pc, HANDLE &fh, ACCESS_MASK access, ULONG flags)
 				 FileRenameInformation);
   NtClose (tmp_fh);
   if (!NT_SUCCESS (status))
-    debug_printf ("Overwriting with another file failed, status = %y", status);
+    debug_printf ("Overwriting %S (%S) with %S failed, status = %y",
+		  &recycler, pc.get_nt_native_path (), &fname, status);
 
 out:
   if (rootdir)
@@ -725,8 +723,7 @@ unlink_nt (path_conv &pc)
 
       /* If possible, hide the non-atomicity of the "remove R/O flag, remove
 	 link to file" operation behind a transaction. */
-      if (wincap.has_transactions ()
-	  && (pc.fs_flags () & FILE_SUPPORTS_TRANSACTIONS))
+      if ((pc.fs_flags () & FILE_SUPPORTS_TRANSACTIONS))
 	start_transaction (old_trans, trans);
 retry_open:
       status = NtOpenFile (&fh_ro, FILE_WRITE_ATTRIBUTES, &attr, &io,
@@ -794,15 +791,19 @@ retry_open:
     {
       debug_printf ("Sharing violation when opening %S",
 		    pc.get_nt_native_path ());
-      /* We never call try_to_bin on NFS and NetApp for the follwing reasons:
+      /* We never call try_to_bin on NetApp.  Netapp filesystems don't
+	 understand the "move and delete" method at all and have all kinds
+	 of weird effects.  Just setting the delete dispositon usually
+	 works fine, though.
 
 	 NFS implements its own mechanism to remove in-use files, which looks
-	 quite similar to what we do in try_to_bin for remote files.
-
-	 Netapp filesystems don't understand the "move and delete" method
-	 at all and have all kinds of weird effects.  Just setting the delete
-	 dispositon usually works fine, though. */
-      if (!pc.fs_is_nfs () && !pc.fs_is_netapp ())
+	 quite similar to what we do in try_to_bin for remote files.  However,
+	 apparently it doesn't work as desired in all cases.  This has been
+	 observed when running the gawk 4.1.62++ testcase "testext.awk" under
+	 Windows 10.  So for NFS we still call try_to_bin to rename the file,
+	 at least to make room for subsequent creation of a file with the
+	 same filename. */
+      if (!pc.fs_is_netapp ())
 	bin_stat = move_to_bin;
       /* If the file is not a directory, of if we didn't set the move_to_bin
 	 flag, just proceed with the FILE_SHARE_VALID_FLAGS set. */
@@ -1007,10 +1008,10 @@ try_again:
 	     "Subsequently, the only legal operation by such a caller is
 	     to close the open file handle."
 
-	     FIXME? On Vista and later, we could use FILE_HARD_LINK_INFORMATION
-	     to find all hardlinks and use one of them to restore the R/O bit,
-	     after the NtClose, but before we stop the transaction.  This
-	     avoids the aforementioned problem entirely . */
+	     FIXME?  We could use FILE_HARD_LINK_INFORMATION to find all
+	     hardlinks and use one of them to restore the R/O bit, after the
+	     NtClose, but before we stop the transaction.  This avoids the
+	     aforementioned problem entirely . */
 	  else if (pc.is_lnk_symlink () && num_links > 1)
 	    NtSetAttributesFile (fh, pc.file_attributes ());
 	}
@@ -1129,21 +1130,6 @@ getppid ()
 extern "C" pid_t
 setsid (void)
 {
-#ifdef NEWVFORK
-  vfork_save *vf = vfork_storage.val ();
-  /* This is a horrible, horrible kludge */
-  if (vf && vf->pid < 0)
-    {
-      pid_t pid = fork ();
-      if (pid > 0)
-	{
-	  syscall_printf ("longjmping due to vfork");
-	  vf->restore_pid (pid);
-	}
-      /* assuming that fork was successful */
-    }
-#endif
-
   if (myself->pgid == myself->pid)
     syscall_printf ("hmm.  pgid %d pid %d", myself->pgid, myself->pid);
   else
@@ -1211,7 +1197,6 @@ read (int fd, void *ptr, size_t len)
   __except (EFAULT) {}
   __endtry
   syscall_printf ("%lR = read(%d, %p, %d)", res, fd, ptr, len);
-  MALLOC_CHECK;
   return (ssize_t) res;
 }
 
@@ -1253,7 +1238,6 @@ readv (int fd, const struct iovec *const iov, const int iovcnt)
   __except (EFAULT) {}
   __endtry
   syscall_printf ("%lR = readv(%d, %p, %d)", res, fd, iov, iovcnt);
-  MALLOC_CHECK;
   return res;
 }
 
@@ -1304,7 +1288,6 @@ write (int fd, const void *ptr, size_t len)
   __except (EFAULT) {}
   __endtry
   syscall_printf ("%lR = write(%d, %p, %d)", res, fd, ptr, len);
-  MALLOC_CHECK;
   return res;
 }
 
@@ -1351,7 +1334,6 @@ writev (const int fd, const struct iovec *const iov, const int iovcnt)
     paranoid_printf ("%lR = writev(%d, %p, %d)", res, fd, iov, iovcnt);
   else
     syscall_printf ("%lR = writev(%d, %p, %d)", res, fd, iov, iovcnt);
-  MALLOC_CHECK;
   return res;
 }
 
@@ -1380,6 +1362,7 @@ open (const char *unix_path, int flags, ...)
   int res = -1;
   va_list ap;
   mode_t mode = 0;
+  fhandler_base *fh = NULL;
 
   pthread_testcancel ();
 
@@ -1387,70 +1370,109 @@ open (const char *unix_path, int flags, ...)
     {
       syscall_printf ("open(%s, %y)", unix_path, flags);
       if (!*unix_path)
-	set_errno (ENOENT);
-      else
 	{
-	  /* check for optional mode argument */
-	  va_start (ap, flags);
-	  mode = va_arg (ap, mode_t);
-	  va_end (ap);
-
-	  fhandler_base *fh;
-	  cygheap_fdnew fd;
-
-	  if (fd >= 0)
-	    {
-	      /* This is a temporary kludge until all utilities can catch up
-		 with a change in behavior that implements linux functionality: 
-		 opening a tty should not automatically cause it to become the
-		 controlling tty for the process.  */
-	      int opt = PC_OPEN | ((flags & (O_NOFOLLOW | O_EXCL))
-				   ?  PC_SYM_NOFOLLOW : PC_SYM_FOLLOW);
-	      if (!(flags & O_NOCTTY) && fd > 2 && myself->ctty != -2)
-		{
-		  flags |= O_NOCTTY;
-		  /* flag that, if opened, this fhandler could later be capable
-		     of being a controlling terminal if /dev/tty is opened. */
-		  opt |= PC_CTTY;
-		}
-	      if (!(fh = build_fh_name (unix_path, opt, stat_suffixes)))
-		;		// errno already set
-	      else if ((flags & O_NOFOLLOW) && fh->issymlink ())
-		{
-		  delete fh;
-		  set_errno (ELOOP);
-		}
-	      else if ((flags & O_DIRECTORY) && fh->exists ()
-		       && !fh->pc.isdir ())
-		{
-		  delete fh;
-		  set_errno (ENOTDIR);
-		}
-	      else if (((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL))
-		       && fh->exists ())
-		{
-		  delete fh;
-		  set_errno (EEXIST);
-		}
-	      else if ((fh->is_fs_special ()
-	      		&& fh->device_access_denied (flags))
-		       || !fh->open_with_arch (flags, (mode & 07777)
-						      & ~cygheap->umask))
-		delete fh;
-	      else
-		{
-		  fd = fh;
-		  if (fd <= 2)
-		    set_std_handle (fd);
-		  res = fd;
-		}
-	    }
+	  set_errno (ENOENT);
+	  __leave;
 	}
 
-      syscall_printf ("%R = open(%s, %y)", res, unix_path, flags);
+      /* check for optional mode argument */
+      va_start (ap, flags);
+      mode = va_arg (ap, mode_t);
+      va_end (ap);
+
+      cygheap_fdnew fd;
+
+      if (fd < 0)
+	__leave;		/* errno already set */
+
+      /* This is a temporary kludge until all utilities can catch up
+	 with a change in behavior that implements linux functionality:
+	 opening a tty should not automatically cause it to become the
+	 controlling tty for the process.  */
+      int opt = PC_OPEN | ((flags & (O_NOFOLLOW | O_EXCL))
+			   ?  PC_SYM_NOFOLLOW : PC_SYM_FOLLOW);
+      if (!(flags & O_NOCTTY) && fd > 2 && myself->ctty != -2)
+	{
+	  flags |= O_NOCTTY;
+	  /* flag that, if opened, this fhandler could later be capable
+	     of being a controlling terminal if /dev/tty is opened. */
+	  opt |= PC_CTTY;
+	}
+
+      if (!(fh = build_fh_name (unix_path, opt, stat_suffixes)))
+	__leave;		/* errno already set */
+      if ((flags & O_NOFOLLOW) && fh->issymlink ())
+	{
+	  set_errno (ELOOP);
+	  __leave;
+	}
+      if ((flags & O_DIRECTORY) && fh->exists () && !fh->pc.isdir ())
+	{
+	  set_errno (ENOTDIR);
+	  __leave;
+	}
+      if (((flags & (O_CREAT | O_EXCL)) == (O_CREAT | O_EXCL)) && fh->exists ())
+	{
+	  set_errno (EEXIST);
+	  __leave;
+	}
+      if (flags & O_TMPFILE)
+	{
+	  if ((flags & O_ACCMODE) != O_WRONLY && (flags & O_ACCMODE) != O_RDWR)
+	    {
+	      set_errno (EINVAL);
+	      __leave;
+	    }
+	  if (!fh->pc.isdir ())
+	    {
+	      set_errno (fh->exists () ? ENOTDIR : ENOENT);
+	      __leave;
+	    }
+	  /* Unfortunately Windows does not allow to create a nameless file.
+	     So create unique filename instead.  It starts with ".cyg_tmp_",
+	     followed by an 8 byte unique hex number, followed by an 8 byte
+	     random hex number. */
+	  int64_t rnd;
+	  fhandler_base *fh_file;
+	  char *new_path;
+
+	  new_path = (char *) malloc (strlen (fh->get_name ())
+				      + 1  /* slash */
+				      + 10 /* prefix */
+				      + 16 /* 64 bit unique id as hex*/
+				      + 16 /* 64 bit random number as hex */
+				      + 1  /* trailing NUL */);
+	  if (!new_path)
+	    __leave;
+	  fh->set_unique_id ();
+	  RtlGenRandom (&rnd, sizeof rnd);
+	  __small_sprintf (new_path, "%s/%s%016X%016X",
+			   fh->get_name (), ".cyg_tmp_",
+			   fh->get_unique_id (), rnd);
+
+	  if (!(fh_file = build_fh_name (new_path, opt, NULL)))
+	    {
+	      free (new_path);
+	      __leave;		/* errno already set */
+	    }
+	  delete fh;
+	  fh = fh_file;
+	}
+
+      if ((fh->is_fs_special () && fh->device_access_denied (flags))
+	  || !fh->open_with_arch (flags, mode & 07777))
+	__leave;		/* errno already set */
+
+      fd = fh;
+      if (fd <= 2)
+	set_std_handle (fd);
+      res = fd;
     }
   __except (EFAULT) {}
   __endtry
+  if (res < 0 && fh)
+    delete fh;
+  syscall_printf ("%R = open(%s, %y)", res, unix_path, flags);
   return res;
 }
 
@@ -1485,16 +1507,16 @@ lseek64 (int fd, off_t pos, int dir)
 
 EXPORT_ALIAS (lseek64, _lseek64)
 
-#ifdef __x86_64__
-EXPORT_ALIAS (lseek64, lseek)
-EXPORT_ALIAS (lseek64, _lseek)
-#else
+#ifdef __i386__
 extern "C" _off_t
 lseek (int fd, _off_t pos, int dir)
 {
   return lseek64 (fd, (off_t) pos, dir);
 }
 EXPORT_ALIAS (lseek, _lseek)
+#else
+EXPORT_ALIAS (lseek64, lseek)
+EXPORT_ALIAS (lseek64, _lseek)
 #endif
 
 
@@ -1507,7 +1529,6 @@ close (int fd)
 
   pthread_testcancel ();
 
-  MALLOC_CHECK;
   cygheap_fdget cfd (fd, true);
   if (cfd < 0)
     res = -1;
@@ -1519,7 +1540,6 @@ close (int fd)
     }
 
   syscall_printf ("%R = close(%d)", res, fd);
-  MALLOC_CHECK;
   return res;
 }
 
@@ -1603,15 +1623,15 @@ chown32 (const char * name, uid_t uid, gid_t gid)
   return chown_worker (name, PC_SYM_FOLLOW, uid, gid);
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (chown32, chown)
-#else
+#ifdef __i386__
 extern "C" int
 chown (const char * name, __uid16_t uid, __gid16_t gid)
 {
   return chown_worker (name, PC_SYM_FOLLOW,
 		       uid16touid32 (uid), gid16togid32 (gid));
 }
+#else
+EXPORT_ALIAS (chown32, chown)
 #endif
 
 extern "C" int
@@ -1620,15 +1640,15 @@ lchown32 (const char * name, uid_t uid, gid_t gid)
   return chown_worker (name, PC_SYM_NOFOLLOW, uid, gid);
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (lchown32, lchown)
-#else
+#ifdef __i386__
 extern "C" int
 lchown (const char * name, __uid16_t uid, __gid16_t gid)
 {
   return chown_worker (name, PC_SYM_NOFOLLOW,
 		       uid16touid32 (uid), gid16togid32 (gid));
 }
+#else
+EXPORT_ALIAS (lchown32, lchown)
 #endif
 
 extern "C" int
@@ -1647,14 +1667,14 @@ fchown32 (int fd, uid_t uid, gid_t gid)
   return res;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (fchown32, fchown)
-#else
+#ifdef __i386__
 extern "C" int
 fchown (int fd, __uid16_t uid, __gid16_t gid)
 {
   return fchown32 (fd, uid16touid32 (uid), gid16togid32 (gid));
 }
+#else
+EXPORT_ALIAS (fchown32, fchown)
 #endif
 
 /* umask: POSIX 5.3.3.1 */
@@ -1671,7 +1691,7 @@ umask (mode_t mask)
 int
 chmod_device (path_conv& pc, mode_t mode)
 {
-  return mknod_worker (pc.get_win32 (), pc.dev.mode & S_IFMT, mode, pc.dev.get_major (), pc.dev.get_minor ());
+  return mknod_worker (pc.get_win32 (), pc.dev.mode () & S_IFMT, mode, pc.dev.get_major (), pc.dev.get_minor ());
 }
 
 #define FILTERED_MODE(m)	((m) & (S_ISUID | S_ISGID | S_ISVTX \
@@ -1715,7 +1735,7 @@ fchmod (int fd, mode_t mode)
   return cfd->fchmod (FILTERED_MODE (mode));
 }
 
-#ifndef __x86_64__
+#ifdef __i386__
 static void
 stat64_to_stat32 (struct stat *src, struct __stat32 *dst)
 {
@@ -1819,10 +1839,7 @@ _fstat64_r (struct _reent *ptr, int fd, struct stat *buf)
   return ret;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (fstat64, fstat)
-EXPORT_ALIAS (_fstat64_r, _fstat_r)
-#else
+#ifdef __i386__
 extern "C" int
 fstat (int fd, struct stat *buf)
 {
@@ -1842,6 +1859,9 @@ _fstat_r (struct _reent *ptr, int fd, struct stat *buf)
     ptr->_errno = get_errno ();
   return ret;
 }
+#else
+EXPORT_ALIAS (fstat64, fstat)
+EXPORT_ALIAS (_fstat64_r, _fstat_r)
 #endif
 
 /* fsync: P96 6.6.1.1 */
@@ -1952,7 +1972,6 @@ stat_worker (path_conv &pc, struct stat *buf)
     }
   __except (EFAULT) {}
   __endtry
-  MALLOC_CHECK;
   syscall_printf ("%d = (%S,%p)", res, pc.get_nt_native_path (), buf);
   return res;
 }
@@ -1977,10 +1996,7 @@ _stat64_r (struct _reent *__restrict ptr, const char *__restrict name,
   return ret;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (stat64, stat)
-EXPORT_ALIAS (_stat64_r, _stat_r)
-#else
+#ifdef __i386__
 extern "C" int
 stat (const char *__restrict name, struct stat *__restrict buf)
 {
@@ -2001,6 +2017,9 @@ _stat_r (struct _reent *__restrict ptr, const char *__restrict name,
     ptr->_errno = get_errno ();
   return ret;
 }
+#else
+EXPORT_ALIAS (stat64, stat)
+EXPORT_ALIAS (_stat64_r, _stat_r)
 #endif
 
 /* lstat: Provided by SVR4 and 4.3+BSD, POSIX? */
@@ -2013,9 +2032,7 @@ lstat64 (const char *__restrict name, struct stat *__restrict buf)
   return stat_worker (pc, buf);
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (lstat64, lstat)
-#else
+#ifdef __i386__
 /* lstat: Provided by SVR4 and 4.3+BSD, POSIX? */
 extern "C" int
 lstat (const char *__restrict name, struct stat *__restrict buf)
@@ -2026,6 +2043,8 @@ lstat (const char *__restrict name, struct stat *__restrict buf)
     stat64_to_stat32 (&buf64, (struct __stat32 *) buf);
   return ret;
 }
+#else
+EXPORT_ALIAS (lstat64, lstat)
 #endif
 
 extern "C" int
@@ -2125,14 +2144,19 @@ nt_path_has_executable_suffix (PUNICODE_STRING upath)
   return false;
 }
 
-extern "C" int
-rename (const char *oldpath, const char *newpath)
+/* If newpath names an existing file and the RENAME_NOREPLACE flag is
+   specified, fail with EEXIST.  Exception: Don't fail if the purpose
+   of the rename is just to change the case of oldpath on a
+   case-insensitive file system. */
+static int
+rename2 (const char *oldpath, const char *newpath, unsigned int flags)
 {
   tmp_pathbuf tp;
   int res = -1;
   path_conv oldpc, newpc, new2pc, *dstpc, *removepc = NULL;
   bool old_dir_requested = false, new_dir_requested = false;
   bool old_explicit_suffix = false, new_explicit_suffix = false;
+  bool noreplace = flags & RENAME_NOREPLACE;
   size_t olen, nlen;
   bool equal_path;
   NTSTATUS status = STATUS_SUCCESS;
@@ -2145,6 +2169,12 @@ rename (const char *oldpath, const char *newpath)
 
   __try
     {
+      if (flags & ~RENAME_NOREPLACE)
+	/* RENAME_NOREPLACE is the only flag currently supported. */
+	{
+	  set_errno (EINVAL);
+	  __leave;
+	}
       if (!*oldpath || !*newpath)
 	{
 	  /* Reject rename("","x"), rename("x","").  */
@@ -2301,7 +2331,7 @@ rename (const char *oldpath, const char *newpath)
 	  /* Check for newpath being identical or a subdir of oldpath. */
 	  if (RtlPrefixUnicodeString (oldpc.get_nt_native_path (),
 				      newpc.get_nt_native_path (),
-				      TRUE))
+				      oldpc.objcaseinsensitive ()))
 	    {
 	      if (newpc.get_nt_native_path ()->Length
 		  == oldpc.get_nt_native_path ()->Length)
@@ -2414,11 +2444,17 @@ rename (const char *oldpath, const char *newpath)
 	  __leave;
 	}
 
+      /* Should we replace an existing file? */
+      if ((removepc || dstpc->exists ()) && noreplace)
+	{
+	  set_errno (EEXIST);
+	  __leave;
+	}
+
       /* Opening the file must be part of the transaction.  It's not sufficient
 	 to call only NtSetInformationFile under the transaction.  Therefore we
 	 have to start the transaction here, if necessary. */
-      if (wincap.has_transactions ()
-	  && (dstpc->fs_flags () & FILE_SUPPORTS_TRANSACTIONS)
+      if ((dstpc->fs_flags () & FILE_SUPPORTS_TRANSACTIONS)
 	  && (dstpc->isdir ()
 	      || (!removepc && dstpc->has_attribute (FILE_ATTRIBUTE_READONLY))))
 	start_transaction (old_trans, trans);
@@ -2549,7 +2585,7 @@ rename (const char *oldpath, const char *newpath)
 	      && NT_SUCCESS (NtQueryInformationFile (nfh, &io, &nfii,
 						     sizeof nfii,
 						     FileInternalInformation))
-	      && ofii.FileId.QuadPart == nfii.FileId.QuadPart)
+	      && ofii.IndexNumber.QuadPart == nfii.IndexNumber.QuadPart)
 	    {
 	      debug_printf ("%s and %s are the same file", oldpath, newpath);
 	      NtClose (nfh);
@@ -2569,11 +2605,15 @@ rename (const char *oldpath, const char *newpath)
 	  __leave;
 	}
       pfri = (PFILE_RENAME_INFORMATION) tp.w_get ();
-      pfri->ReplaceIfExists = TRUE;
+      pfri->ReplaceIfExists = !noreplace;
       pfri->RootDirectory = NULL;
       pfri->FileNameLength = dstpc->get_nt_native_path ()->Length;
       memcpy (&pfri->FileName,  dstpc->get_nt_native_path ()->Buffer,
 	      pfri->FileNameLength);
+      /* If dstpc points to an existing file and RENAME_NOREPLACE has
+	 been specified, then we should get NT error
+	 STATUS_OBJECT_NAME_COLLISION ==> Win32 error
+	 ERROR_ALREADY_EXISTS ==> Cygwin error EEXIST. */
       status = NtSetInformationFile (fh, &io, pfri,
 				     sizeof *pfri + pfri->FileNameLength,
 				     FileRenameInformation);
@@ -2587,11 +2627,10 @@ rename (const char *oldpath, const char *newpath)
       if (status == STATUS_ACCESS_DENIED && dstpc->exists ()
 	  && !dstpc->isdir ())
 	{
-	  if (wincap.has_transactions ()
-	      && (dstpc->fs_flags () & FILE_SUPPORTS_TRANSACTIONS)
-	      && !trans)
+	  bool need_open = false;
+
+	  if ((dstpc->fs_flags () & FILE_SUPPORTS_TRANSACTIONS) && !trans)
 	    {
-	      start_transaction (old_trans, trans);
 	      /* As mentioned earlier, opening the file must be part of the
 		 transaction.  Therefore we have to reopen the file here if the
 		 transaction hasn't been started already.  Unfortunately we
@@ -2601,28 +2640,34 @@ rename (const char *oldpath, const char *newpath)
 		 re-open it.  Fortunately nothing has happened yet, so the
 		 atomicity of the rename functionality is not spoiled. */
 	      NtClose (fh);
-    retry_reopen:
-	      status = NtOpenFile (&fh, DELETE,
-				   oldpc.get_object_attr (attr, sec_none_nih),
-				   &io, FILE_SHARE_VALID_FLAGS,
-				   FILE_OPEN_FOR_BACKUP_INTENT
-				   | (oldpc.is_rep_symlink ()
-				      ? FILE_OPEN_REPARSE_POINT : 0));
-	      if (!NT_SUCCESS (status))
-		{
-		  if (NT_TRANSACTIONAL_ERROR (status) && trans)
-		    {
-		      /* If NtOpenFile fails due to transactional problems,
-			 stop transaction and go ahead without. */
-		      stop_transaction (status, old_trans, trans);
-		      debug_printf ("Transaction failure.  Retry open.");
-		      goto retry_reopen;
-		    }
-		  __seterrno_from_nt_status (status);
-		  __leave;
-		}
+	      start_transaction (old_trans, trans);
+	      need_open = true;
 	    }
-	  if (NT_SUCCESS (status = unlink_nt (*dstpc)))
+	  while (true)
+	    {
+	      status = STATUS_SUCCESS;
+	      if (need_open)
+		status = NtOpenFile (&fh, DELETE,
+				     oldpc.get_object_attr (attr, sec_none_nih),
+				     &io, FILE_SHARE_VALID_FLAGS,
+				     FILE_OPEN_FOR_BACKUP_INTENT
+				     | (oldpc.is_rep_symlink ()
+					? FILE_OPEN_REPARSE_POINT : 0));
+	      if (NT_SUCCESS (status))
+		{
+		  status = unlink_nt (*dstpc);
+		  if (NT_SUCCESS (status))
+		    break;
+		}
+	      if (!NT_TRANSACTIONAL_ERROR (status) || !trans)
+		break;
+	      /* If NtOpenFile or unlink_nt fail due to transactional problems,
+		 stop transaction and retry without. */
+	      NtClose (fh);
+	      stop_transaction (status, old_trans, trans);
+	      debug_printf ("Transaction failure %y.  Retry open.", status);
+	    }
+	  if (NT_SUCCESS (status))
 	    status = NtSetInformationFile (fh, &io, pfri,
 					   sizeof *pfri + pfri->FileNameLength,
 					   FileRenameInformation);
@@ -2649,6 +2694,12 @@ rename (const char *oldpath, const char *newpath)
   if (get_errno () != EFAULT)
     syscall_printf ("%R = rename(%s, %s)", res, oldpath, newpath);
   return res;
+}
+
+extern "C" int
+rename (const char *oldpath, const char *newpath)
+{
+  return rename2 (oldpath, newpath, 0);
 }
 
 extern "C" int
@@ -2795,7 +2846,7 @@ ctermid (char *str)
     {
       device d;
       d.parse (myself->ctty);
-      strcpy (str, d.name);
+      strcpy (str, d.name ());
     }
   return str;
 }
@@ -2928,7 +2979,7 @@ posix_fadvise (int fd, off_t offset, off_t len, int advice)
   if (cfd >= 0)
     res = cfd->fadvise (offset, len, advice);
   else
-    set_errno (EBADF);
+    res = EBADF;
   syscall_printf ("%R = posix_fadvice(%d, %D, %D, %d)",
 		  res, fd, offset, len, advice);
   return res;
@@ -2937,16 +2988,16 @@ posix_fadvise (int fd, off_t offset, off_t len, int advice)
 extern "C" int
 posix_fallocate (int fd, off_t offset, off_t len)
 {
-  int res = -1;
+  int res = 0;
   if (offset < 0 || len == 0)
-    set_errno (EINVAL);
+    res = EINVAL;
   else
     {
       cygheap_fdget cfd (fd);
       if (cfd >= 0)
 	res = cfd->ftruncate (offset + len, false);
       else
-	set_errno (EBADF);
+	res = EBADF;
     }
   syscall_printf ("%R = posix_fallocate(%d, %D, %D)", res, fd, offset, len);
   return res;
@@ -2958,22 +3009,29 @@ ftruncate64 (int fd, off_t length)
   int res = -1;
   cygheap_fdget cfd (fd);
   if (cfd >= 0)
-    res = cfd->ftruncate (length, true);
+    {
+      res = cfd->ftruncate (length, true);
+      if (res)
+	{
+	  set_errno (res);
+	  res = -1;
+	}
+    }
   else
     set_errno (EBADF);
   syscall_printf ("%R = ftruncate(%d, %D)", res, fd, length);
   return res;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (ftruncate64, ftruncate)
-#else
+#ifdef __i386__
 /* ftruncate: P96 5.6.7.1 */
 extern "C" int
 ftruncate (int fd, _off_t length)
 {
   return ftruncate64 (fd, (off_t)length);
 }
+#else
+EXPORT_ALIAS (ftruncate64, ftruncate)
 #endif
 
 /* truncate: Provided by SVR4 and 4.3+BSD.  Not part of POSIX.1 or XPG3 */
@@ -2995,15 +3053,15 @@ truncate64 (const char *pathname, off_t length)
   return res;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (truncate64, truncate)
-#else
+#ifdef __i386__
 /* truncate: Provided by SVR4 and 4.3+BSD.  Not part of POSIX.1 or XPG3 */
 extern "C" int
 truncate (const char *pathname, _off_t length)
 {
   return truncate64 (pathname, (off_t)length);
 }
+#else
+EXPORT_ALIAS (truncate64, truncate)
 #endif
 
 extern "C" long
@@ -3064,7 +3122,6 @@ statvfs (const char *name, struct statvfs *sfs)
   __except (EFAULT) {}
   __endtry
   delete fh;
-  MALLOC_CHECK;
   if (get_errno () != EFAULT)
     syscall_printf ("%R = statvfs(%s,%p)", res, name, sfs);
   return res;
@@ -3295,9 +3352,9 @@ seteuid32 (uid_t uid)
 		       CW_TOKEN_RESTRICTED);
        setuid (getuid ());
 
-    Note that using the current uid is a requirement!  Starting with Windows
-    Vista, we have restricted tokens galore (UAC), so this is really just
-    a special case to restict your own processes to lesser rights. */
+    Note that using the current uid is a requirement!  We have restricted
+    tokens galore (UAC), so this is really just a special case to restrict
+    your own processes to lesser rights. */
   bool request_restricted_uid_switch = (uid == myself->uid
       && cygheap->user.ext_token_is_restricted);
   if (uid == myself->uid && !cygheap->user.groups.ischanged
@@ -3491,14 +3548,14 @@ seteuid32 (uid_t uid)
   return 0;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (seteuid32, seteuid)
-#else
+#ifdef __i386__
 extern "C" int
 seteuid (__uid16_t uid)
 {
   return seteuid32 (uid16touid32 (uid));
 }
+#else
+EXPORT_ALIAS (seteuid32, seteuid)
 #endif
 
 /* setuid: POSIX 4.2.2.1 */
@@ -3516,14 +3573,14 @@ setuid32 (uid_t uid)
   return ret;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (setuid32, setuid)
-#else
+#ifdef __i386__
 extern "C" int
 setuid (__uid16_t uid)
 {
   return setuid32 (uid16touid32 (uid));
 }
+#else
+EXPORT_ALIAS (setuid32, setuid)
 #endif
 
 extern "C" int
@@ -3545,14 +3602,14 @@ setreuid32 (uid_t ruid, uid_t euid)
   return ret;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (setreuid32, setreuid)
-#else
+#ifdef __i386__
 extern "C" int
 setreuid (__uid16_t ruid, __uid16_t euid)
 {
   return setreuid32 (uid16touid32 (ruid), uid16touid32 (euid));
 }
+#else
+EXPORT_ALIAS (setreuid32, setreuid)
 #endif
 
 /* setegid: from System V.  */
@@ -3605,14 +3662,14 @@ setegid32 (gid_t gid)
   return 0;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (setegid32, setegid)
-#else
+#ifdef __i386__
 extern "C" int
 setegid (__gid16_t gid)
 {
   return setegid32 (gid16togid32 (gid));
 }
+#else
+EXPORT_ALIAS (setegid32, setegid)
 #endif
 
 /* setgid: POSIX 4.2.2.1 */
@@ -3625,9 +3682,7 @@ setgid32 (gid_t gid)
   return ret;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (setgid32, setgid)
-#else
+#ifdef __i386__
 extern "C" int
 setgid (__gid16_t gid)
 {
@@ -3636,6 +3691,8 @@ setgid (__gid16_t gid)
     cygheap->user.real_gid = myself->gid;
   return ret;
 }
+#else
+EXPORT_ALIAS (setgid32, setgid)
 #endif
 
 extern "C" int
@@ -3657,14 +3714,14 @@ setregid32 (gid_t rgid, gid_t egid)
   return ret;
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (setregid32, setregid)
-#else
+#ifdef __i386__
 extern "C" int
 setregid (__gid16_t rgid, __gid16_t egid)
 {
   return setregid32 (gid16togid32 (rgid), gid16togid32 (egid));
 }
+#else
+EXPORT_ALIAS (setregid32, setregid)
 #endif
 
 /* chroot: privileged Unix system call.  */
@@ -3839,7 +3896,7 @@ getpriority (int which, id_t who)
 	  case PRIO_USER:
 	    if ((uid_t) who == p->uid && p->nice < nice)
 	      nice = p->nice;
-	      break;
+	    break;
 	  }
     }
 out:
@@ -3856,28 +3913,6 @@ extern "C" int
 nice (int incr)
 {
   return setpriority (PRIO_PROCESS, myself->pid, myself->nice + incr);
-}
-
-/*
- * Find the first bit set in I.
- */
-
-extern "C" int
-ffs (int i)
-{
-  return __builtin_ffs (i);
-}
-
-extern "C" int
-ffsl (long i)
-{
-  return __builtin_ffsl (i);
-}
-
-extern "C" int
-ffsll (long long i)
-{
-  return __builtin_ffsll (i);
 }
 
 static void
@@ -3956,7 +3991,7 @@ endutent ()
     }
 }
 
-extern "C" void
+extern "C" int
 utmpname (const char *file)
 {
   __try
@@ -3965,13 +4000,17 @@ utmpname (const char *file)
 	{
 	  endutent ();
 	  utmp_file = strdup (file);
-	  debug_printf ("New UTMP file: %s", utmp_file);
-	  return;
+	  if (utmp_file)
+	    {
+	      debug_printf ("New UTMP file: %s", utmp_file);
+	      return 0;
+	    }
 	}
     }
-  __except (NO_ERROR) {}
+  __except (EFAULT) {}
   __endtry
-  debug_printf ("Invalid file");
+  debug_printf ("Setting UTMP file failed");
+  return -1;
 }
 
 EXPORT_ALIAS (utmpname, utmpxname)
@@ -4811,8 +4850,8 @@ readlinkat (int dirfd, const char *__restrict pathname, char *__restrict buf,
 }
 
 extern "C" int
-renameat (int olddirfd, const char *oldpathname,
-	  int newdirfd, const char *newpathname)
+renameat2 (int olddirfd, const char *oldpathname,
+	   int newdirfd, const char *newpathname, unsigned int flags)
 {
   tmp_pathbuf tp;
   __try
@@ -4823,11 +4862,18 @@ renameat (int olddirfd, const char *oldpathname,
       char *newpath = tp.c_get ();
       if (gen_full_path_at (newpath, newdirfd, newpathname))
 	__leave;
-      return rename (oldpath, newpath);
+      return rename2 (oldpath, newpath, flags);
     }
   __except (EFAULT) {}
   __endtry
   return -1;
+}
+
+extern "C" int
+renameat (int olddirfd, const char *oldpathname,
+	  int newdirfd, const char *newpathname)
+{
+  return renameat2 (olddirfd, oldpathname, newdirfd, newpathname, 0);
 }
 
 extern "C" int
@@ -4841,7 +4887,7 @@ scandirat (int dirfd, const char *pathname, struct dirent ***namelist,
       char *path = tp.c_get ();
       if (gen_full_path_at (path, dirfd, pathname))
 	__leave;
-      return scandir (pathname, namelist, select, compar);
+      return scandir (path, namelist, select, compar);
     }
   __except (EFAULT) {}
   __endtry

@@ -38,7 +38,7 @@
    case _STDIO_CLOSE_PER_REENT_STD_STREAMS is defined these file descriptors
    will be closed via close() provided the owner of the reent structure
    triggerd the on demand reent initilization, see CHECK_INIT(). */
-#if !defined(__rtems__) && !defined(__tirtos__)
+#if !defined(__tirtos__)
 #define _STDIO_CLOSE_PER_REENT_STD_STREAMS
 #endif
 
@@ -182,6 +182,7 @@ extern int    _EXFUN(__stextmode,(int));
 extern _VOID   _EXFUN(__sinit,(struct _reent *));
 extern _VOID   _EXFUN(_cleanup_r,(struct _reent *));
 extern _VOID   _EXFUN(__smakebuf_r,(struct _reent *, FILE *));
+extern int    _EXFUN(__swhatbuf_r,(struct _reent *, FILE *, size_t *, int *));
 extern int    _EXFUN(_fwalk,(struct _reent *, int (*)(FILE *)));
 extern int    _EXFUN(_fwalk_reent,(struct _reent *, int (*)(struct _reent *, FILE *)));
 struct _glue * _EXFUN(__sfmoreglue,(struct _reent *,int n));
@@ -305,7 +306,7 @@ _VOID _EXFUN(__sinit_lock_release,(_VOID));
 /* Types used in positional argument support in vfprinf/vfwprintf.
    The implementation is char/wchar_t dependent but the class and state
    tables are only defined once in vfprintf.c. */
-typedef enum {
+typedef enum __packed {
   ZERO,   /* '0' */
   DIGIT,  /* '1-9' */
   DOLLAR, /* '$' */
@@ -318,7 +319,7 @@ typedef enum {
   MAX_CH_CLASS /* place-holder */
 } __CH_CLASS;
 
-typedef enum {
+typedef enum __packed {
   START,  /* start */
   SFLAG,  /* seen a flag */
   WDIG,   /* seen digits in width area */
@@ -334,7 +335,7 @@ typedef enum {
   MAX_STATE, /* place-holder */
 } __STATE;
 
-typedef enum {
+typedef enum __packed {
   NOOP,  /* do nothing */
   NUMBER, /* build a number from digits */
   SKIPNUM, /* skip over digits */

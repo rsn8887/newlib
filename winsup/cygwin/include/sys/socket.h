@@ -1,8 +1,5 @@
 /* sys/socket.h
 
-   Copyright 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2005, 2006, 2009, 2010,
-   2013, 2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -51,6 +48,10 @@ extern "C"
 
 #ifdef __cplusplus
 };
+#endif
+
+#if __SSP_FORTIFY_LEVEL > 0
+#include <ssp/socket.h>
 #endif
 
 #endif /* _SYS_SOCKET_H */

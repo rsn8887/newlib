@@ -1,8 +1,5 @@
 /* shm.cc: XSI IPC interface for Cygwin.
 
-   Copyright 2001, 2002, 2003, 2004, 2005, 2007, 2008, 2009, 2012, 2013, 2014,
-   2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -20,6 +17,10 @@ details. */
 #include "cygtls.h"
 #include "sync.h"
 #include "ntdll.h"
+
+/* __getpagesize is only available from libcygwin.a */
+#undef SHMLBA
+#define SHMLBA (wincap.allocation_granularity ())
 
 /*
  * client_request_shm Constructors

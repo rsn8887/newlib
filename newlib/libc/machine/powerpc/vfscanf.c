@@ -9,7 +9,7 @@ INDEX
 INDEX
 	vsscanf
 
-ANSI_SYNOPSIS
+SYNOPSIS
 	#include <stdio.h>
 	#include <stdarg.h>
 	int vscanf(const char *restrict <[fmt]>, va_list <[list]>);
@@ -22,40 +22,6 @@ ANSI_SYNOPSIS
                        va_list <[list]>);
 	int _vsscanf_r(void *<[reent]>, const char *restrict <[str]>, const char *restrict <[fmt]>, 
                        va_list <[list]>);
-
-TRAD_SYNOPSIS
-	#include <stdio.h>
-	#include <varargs.h>
-	int vscanf( <[fmt]>, <[ist]>)
-	char *<[fmt]>;
-	va_list <[list]>;
-
-	int vfscanf( <[fp]>, <[fmt]>, <[list]>)
-	FILE *<[fp]>;
-	char *<[fmt]>;
-	va_list <[list]>;
-	
-	int vsscanf( <[str]>, <[fmt]>, <[list]>)
-	char *<[str]>;
-	char *<[fmt]>;
-	va_list <[list]>;
-
-	int _vscanf_r( <[reent]>, <[fmt]>, <[ist]>)
-	char *<[reent]>;
-	char *<[fmt]>;
-	va_list <[list]>;
-
-	int _vfscanf_r( <[reent]>, <[fp]>, <[fmt]>, <[list]>)
-	char *<[reent]>;
-	FILE *<[fp]>;
-	char *<[fmt]>;
-	va_list <[list]>;
-	
-	int _vsscanf_r( <[reent]>, <[str]>, <[fmt]>, <[list]>)
-	char *<[reent]>;
-	char *<[str]>;
-	char *<[fmt]>;
-	va_list <[list]>;
 
 DESCRIPTION
 <<vscanf>>, <<vfscanf>>, and <<vsscanf>> are (respectively) variants
@@ -131,7 +97,6 @@ Supporting OS subroutines required:
 #define _NO_LONGDBL
 #if defined _WANT_IO_LONG_DOUBLE && (LDBL_MANT_DIG > DBL_MANT_DIG)
 #undef _NO_LONGDBL
-extern _LONG_DOUBLE _strtold _PARAMS((char *s, char **sptr));
 #endif
 
 #define _NO_LONGLONG
@@ -1211,7 +1176,7 @@ __svfscanf_r (rptr, fp, fmt0, ap)
 #ifdef _NO_LONGDBL
 	      res = _strtod_r (rptr, buf, NULL);
 #else  /* !_NO_LONGDBL */
-	      res = _strtold (buf, NULL);
+	      res = _strtold_r (rptr, buf, NULL);
 #endif /* !_NO_LONGDBL */
 	      if (flags & LONG)
 		{

@@ -1,8 +1,5 @@
 /* fhandler_tty.cc
 
-   Copyright 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007,
-   2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -12,6 +9,7 @@ details. */
 #include "winsup.h"
 #include <stdlib.h>
 #include <sys/param.h>
+#include <cygwin/acl.h>
 #include <cygwin/kd.h>
 #include "cygerrno.h"
 #include "security.h"
@@ -388,7 +386,7 @@ fhandler_pty_slave::open (int flags, mode_t)
     sd.malloc (sizeof (SECURITY_DESCRIPTOR));
     RtlCreateSecurityDescriptor (sd, SECURITY_DESCRIPTOR_REVISION);
     SECURITY_ATTRIBUTES sa = { sizeof (SECURITY_ATTRIBUTES), NULL, TRUE };
-    if (!create_object_sd_from_attribute (NULL, myself->uid, myself->gid,
+    if (!create_object_sd_from_attribute (myself->uid, myself->gid,
 					  S_IFCHR | S_IRUSR | S_IWUSR | S_IWGRP,
 					  sd))
       sa.lpSecurityDescriptor = (PSECURITY_DESCRIPTOR) sd;
@@ -619,6 +617,7 @@ fhandler_pty_slave::write (const void *ptr, size_t len)
 	{
 	case ERROR_NO_DATA:
 	  err = ERROR_IO_DEVICE;
+	  /*FALLTHRU*/
 	default:
 	  __seterrno_from_win_error (err);
 	}
@@ -755,10 +754,6 @@ fhandler_pty_slave::read (void *ptr, size_t& len)
 	  goto out;
 	}
 
-      /* On first peek determine no. of bytes to flush. */
-      if (!ptr && len == UINT_MAX)
-	len = (size_t) bytes_in_pipe;
-
       if (ptr && !bytes_in_pipe && !vmin && !time_to_wait)
 	{
 	  ReleaseMutex (input_mutex);
@@ -767,6 +762,8 @@ fhandler_pty_slave::read (void *ptr, size_t& len)
 	}
 
       readlen = bytes_in_pipe ? MIN (len, sizeof (buf)) : 0;
+      if (get_ttyp ()->ti.c_lflag & ICANON && ptr)
+	readlen = MIN (bytes_in_pipe, readlen);
 
 #if 0
       /* Why on earth is the read length reduced to vmin, even if more bytes
@@ -803,7 +800,8 @@ fhandler_pty_slave::read (void *ptr, size_t& len)
 		}
 	      if (n)
 		{
-		  len -= n;
+		  if (!(!ptr && len == UINT_MAX)) /* not tcflush() */
+		    len -= n;
 		  totalread += n;
 		  if (ptr)
 		    {
@@ -1034,6 +1032,7 @@ fhandler_pty_slave::fstat (struct stat *st)
       if (input_available_event)
 	to_close = true;
     }
+  st->st_mode = S_IFCHR;
   if (!input_available_event
       || get_object_attribute (input_available_event, &st->st_uid, &st->st_gid,
 			       &st->st_mode))
@@ -1047,6 +1046,62 @@ fhandler_pty_slave::fstat (struct stat *st)
   if (to_close)
     CloseHandle (input_available_event);
   return 0;
+}
+
+int __reg3
+fhandler_pty_slave::facl (int cmd, int nentries, aclent_t *aclbufp)
+{
+  int res = -1;
+  bool to_close = false;
+  security_descriptor sd;
+  mode_t attr = S_IFCHR;
+
+  switch (cmd)
+    {
+      case SETACL:
+	if (!aclsort32 (nentries, 0, aclbufp))
+	  set_errno (ENOTSUP);
+	break;
+      case GETACL:
+	if (!aclbufp)
+	  {
+	    set_errno (EFAULT);
+	    break;
+	  }
+	/*FALLTHRU*/
+      case GETACLCNT:
+	if (!input_available_event)
+	  {
+	    char buf[MAX_PATH];
+	    shared_name (buf, INPUT_AVAILABLE_EVENT, get_minor ());
+	    input_available_event = OpenEvent (READ_CONTROL, TRUE, buf);
+	    if (input_available_event)
+	      to_close = true;
+	  }
+	if (!input_available_event
+	    || get_object_sd (input_available_event, sd))
+	  {
+	    res = get_posix_access (NULL, &attr, NULL, NULL, aclbufp, nentries);
+	    if (aclbufp && res == MIN_ACL_ENTRIES)
+	      {
+		aclbufp[0].a_perm = S_IROTH | S_IWOTH;
+		aclbufp[0].a_id = 18;
+		aclbufp[1].a_id = 544;
+	      }
+	    break;
+	  }
+	if (cmd == GETACL)
+	  res = get_posix_access (sd, &attr, NULL, NULL, aclbufp, nentries);
+	else
+	  res = get_posix_access (sd, &attr, NULL, NULL, NULL, 0);
+	break;
+      default:
+	set_errno (EINVAL);
+	break;
+    }
+  if (to_close)
+    CloseHandle (input_available_event);
+  return res;
 }
 
 /* Helper function for fchmod and fchown, which just opens all handles
@@ -1111,6 +1166,7 @@ fhandler_pty_slave::fchmod (mode_t mode)
   security_descriptor sd;
   uid_t uid;
   gid_t gid;
+  mode_t orig_mode = S_IFCHR;
 
   if (!input_available_event)
     {
@@ -1120,8 +1176,8 @@ fhandler_pty_slave::fchmod (mode_t mode)
     }
   sd.malloc (sizeof (SECURITY_DESCRIPTOR));
   RtlCreateSecurityDescriptor (sd, SECURITY_DESCRIPTOR_REVISION);
-  if (!get_object_attribute (input_available_event, &uid, &gid, NULL)
-      && !create_object_sd_from_attribute (NULL, uid, gid, S_IFCHR | mode, sd))
+  if (!get_object_attribute (input_available_event, &uid, &gid, &orig_mode)
+      && !create_object_sd_from_attribute (uid, gid, S_IFCHR | mode, sd))
     ret = fch_set_sd (sd, false);
 errout:
   if (to_close)
@@ -1134,10 +1190,10 @@ fhandler_pty_slave::fchown (uid_t uid, gid_t gid)
 {
   int ret = -1;
   bool to_close = false;
-  mode_t mode = 0;
+  security_descriptor sd;
   uid_t o_uid;
   gid_t o_gid;
-  security_descriptor sd;
+  mode_t mode = S_IFCHR;
 
   if (uid == ILLEGAL_UID && gid == ILLEGAL_GID)
     return 0;
@@ -1151,11 +1207,13 @@ fhandler_pty_slave::fchown (uid_t uid, gid_t gid)
   RtlCreateSecurityDescriptor (sd, SECURITY_DESCRIPTOR_REVISION);
   if (!get_object_attribute (input_available_event, &o_uid, &o_gid, &mode))
     {
-      if ((uid == ILLEGAL_UID || uid == o_uid)
-	  && (gid == ILLEGAL_GID || gid == o_gid))
+      if (uid == ILLEGAL_UID)
+	uid = o_uid;
+      if (gid == ILLEGAL_GID)
+	gid = o_gid;
+      if (uid == o_uid && gid == o_gid)
 	ret = 0;
-      else if (!create_object_sd_from_attribute (input_available_event,
-						 uid, gid, S_IFCHR | mode, sd))
+      else if (!create_object_sd_from_attribute (uid, gid, mode, sd))
 	ret = fch_set_sd (sd, true);
     }
 errout:
@@ -1460,10 +1518,8 @@ fhandler_pty_slave::fixup_after_exec ()
 
    A special case is when the master side of the tty is about to be closed.
    The client side is the fhandler_pty_master::close function and it sends
-   a PID -1 in that case.  On Vista and later a check is performed that the
-   request to leave really comes from the master process itself.  On earlier
-   OSes there's no function to check for the PID of the client process so
-   we have to trust the client side.
+   a PID -1 in that case.  A check is performed that the request to leave
+   really comes from the master process itself.
 
    Since there's always only one pipe instance, there's a chance that clients
    have to wait to connect to the master control pipe.  Therefore the client
@@ -1499,9 +1555,6 @@ fhandler_pty_master::pty_master_thread ()
 	  termios_printf ("ReadFile, %E");
 	  goto reply;
 	}
-      /* This function is only available since Vista, unfortunately.
-	 In earlier OSes we simply have to believe that the client
-	 has no malicious intent (== sends arbitrary PIDs). */
       if (!GetNamedPipeClientProcessId (master_ctl, &pid))
 	pid = req.pid;
       if (get_object_sd (input_available_event, sd))
@@ -1541,10 +1594,8 @@ fhandler_pty_master::pty_master_thread ()
 	}
       if (req.pid == (DWORD) -1)	/* Request to finish thread. */
 	{
-	  /* Pre-Vista: Just believe in the good of the client process.
-	     Post-Vista: Check if the requesting process is the master
-	     process itself. */
-	  if (pid == (DWORD) -1 || pid == GetCurrentProcessId ())
+	  /* Check if the requesting process is the master process itself. */
+	  if (pid == GetCurrentProcessId ())
 	    exit = true;
 	  goto reply;
 	}
@@ -1695,7 +1746,7 @@ fhandler_pty_master::setup ()
   /* Create security attribute.  Default permissions are 0620. */
   sd.malloc (sizeof (SECURITY_DESCRIPTOR));
   RtlCreateSecurityDescriptor (sd, SECURITY_DESCRIPTOR_REVISION);
-  if (!create_object_sd_from_attribute (NULL, myself->uid, myself->gid,
+  if (!create_object_sd_from_attribute (myself->uid, myself->gid,
 					S_IFCHR | S_IRUSR | S_IWUSR | S_IWGRP,
 					sd))
     sa.lpSecurityDescriptor = (PSECURITY_DESCRIPTOR) sd;
@@ -1726,8 +1777,7 @@ fhandler_pty_master::setup ()
 				     | FILE_FLAG_FIRST_PIPE_INSTANCE,
 				PIPE_WAIT | PIPE_TYPE_MESSAGE
 				| PIPE_READMODE_MESSAGE
-				| (wincap.has_pipe_reject_remote_clients ()
-				   ? PIPE_REJECT_REMOTE_CLIENTS : 0),
+				| PIPE_REJECT_REMOTE_CLIENTS,
 				1, 4096, 4096, 0, &sec_all_nih);
   if (master_ctl == INVALID_HANDLE_VALUE)
     {

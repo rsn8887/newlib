@@ -10,7 +10,7 @@ FUNCTION
 INDEX
 	fopencookie
 
-ANSI_SYNOPSIS
+SYNOPSIS
 	#include <stdio.h>
 	FILE *fopencookie(const void *<[cookie]>, const char *<[mode]>,
 			  cookie_io_functions_t <[functions]>);
@@ -82,6 +82,7 @@ It is not portable.  See also the <<funopen>> interface from BSD.
 Supporting OS subroutines required: <<sbrk>>.
 */
 
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <errno.h>
 #include <sys/lock.h>

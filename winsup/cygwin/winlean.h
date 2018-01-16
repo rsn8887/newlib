@@ -1,7 +1,5 @@
 /* winlean.h - Standard "lean" windows include
 
-   Copyright 2010, 2011, 2012, 2013, 2014 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -20,6 +18,7 @@ details. */
    autoloaded symbols, which in turn clashes with the definition in the
    w32api library exporting the symbols. */
 #define _ADVAPI32_
+#define _AUTHZ_
 #define _DSGETDCAPI_
 #define _GDI32_
 #define _KERNEL32_

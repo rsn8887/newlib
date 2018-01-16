@@ -1,8 +1,5 @@
 /* sigproc.cc: inter/intra signal and sub process handler
 
-   Copyright 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007,
-   2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -79,9 +76,9 @@ public:
   void add (sigpacket&);
   bool pending () {retry = true; return !!start.next;}
   void clear (int sig) {sigs[sig].si.si_signo = 0;}
-  friend void __reg1 sig_dispatch_pending (bool);;
+  void clear (_cygtls *tls);
+  friend void __reg1 sig_dispatch_pending (bool);
   friend void WINAPI wait_sig (VOID *arg);
-  friend void sigproc_init ();
 };
 
 Static pending_signals sigq;
@@ -155,7 +152,8 @@ proc_can_be_signalled (_pinfo *p)
 bool __reg1
 pid_exists (pid_t pid)
 {
-  return pinfo (pid)->exists ();
+  pinfo p (pid);
+  return p && p->exists ();
 }
 
 /* Return true if this is one of our children, false otherwise.  */
@@ -395,6 +393,30 @@ void __reg1
 sig_clear (int sig)
 {
   sigq.clear (sig);
+}
+
+/* Clear pending signals of specific thread.  Called under TLS lock from
+   _cygtls::remove_pending_sigs. */
+void
+pending_signals::clear (_cygtls *tls)
+{
+  sigpacket *q = &start, *qnext;
+
+  while ((qnext = q->next))
+    if (qnext->sigtls == tls)
+      {
+	qnext->si.si_signo = 0;
+	q->next = qnext->next;
+      }
+    else
+      q = qnext;
+}
+
+/* Clear pending signals of specific thread.  Called from _cygtls::remove */
+void
+_cygtls::remove_pending_sigs ()
+{
+  sigq.clear (this);
 }
 
 extern "C" int
@@ -755,13 +777,8 @@ child_info::child_info (unsigned in_cb, child_info_types chtype,
      This seems to be a bug in Vista's WOW64, which apparently copies the
      lpReserved2 datastructure not using the cbReserved2 size information,
      but using the information given in the first DWORD within lpReserved2
-     instead.  32 bit Windows and former WOW64 don't care if msv_count is 0
-     or a sensible non-0 count value.  However, it's not clear if a non-0
-     count doesn't result in trying to evaluate the content, so we do this
-     really only for Vista 64 for now.
-
-     Note: It turns out that a non-zero value *does* harm operation on
-     XP 64 and 2K3 64 (Crash in CreateProcess call).
+     instead.  However, it's not clear if a non-0 count doesn't result in
+     trying to evaluate the content, so we do this really only for Vista 64.
 
      The value is sizeof (child_info_*) / 5 which results in a count which
      covers the full datastructure, plus not more than 4 extra bytes.  This
@@ -1119,7 +1136,7 @@ remove_proc (int ci)
       if (_my_tls._ctinfo != procs[ci].wait_thread)
 	procs[ci].wait_thread->terminate_thread ();
     }
-  else if (procs[ci]->exists ())
+  else if (procs[ci] && procs[ci]->exists ())
     return true;
 
   sigproc_printf ("removing procs[%d], pid %d, nprocs %d", ci, procs[ci]->pid,
@@ -1341,8 +1358,10 @@ wait_sig (VOID *)
 	    sig_clear (-pack.si.si_signo);
 	  else
 	    sigq.add (pack);
+	  /*FALLTHRU*/
 	case __SIGNOHOLD:
 	  sig_held = false;
+	  /*FALLTHRU*/
 	case __SIGFLUSH:
 	case __SIGFLUSHFAST:
 	  if (!sig_held)

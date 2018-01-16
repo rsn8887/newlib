@@ -47,7 +47,7 @@ INDEX
 INDEX
 	_vswprintf_r
 
-ANSI_SYNOPSIS
+SYNOPSIS
 	#include <stdio.h>
 	#include <stdarg.h>
 	#include <wchar.h>
@@ -132,7 +132,7 @@ SEEALSO
 #include "fvwrite.h"
 #include "vfieeefp.h"
 #ifdef __HAVE_LOCALE_INFO_EXTENDED__
-#include "../locale/lnumeric.h"
+#include "../locale/setlocale.h"
 #endif
 
 /* Currently a test is made to see if long double processing is warranted.
@@ -970,6 +970,8 @@ reswitch:	switch (ch) {
 				break;
 			}
 			if (isnan (_fpvalue)) {
+				if (signbit (_fpvalue))
+					sign = L'-';
 				if (ch <= L'G') /* 'A', 'E', 'F', or 'G' */
 					cp = L"NAN";
 				else
@@ -1001,6 +1003,8 @@ reswitch:	switch (ch) {
 				break;
 			}
 			if (expt == 1) {
+				if (signbit (_fpvalue))
+					sign = L'-';
 				if (ch <= L'G') /* 'A', 'E', 'F', or 'G' */
 					cp = L"NAN";
 				else

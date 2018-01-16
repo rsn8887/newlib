@@ -1,8 +1,5 @@
 /* fhandler.h
 
-   Copyright 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006,
-   2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -56,6 +53,7 @@ typedef struct __DIR DIR;
 struct dirent;
 struct iovec;
 struct acl;
+struct __acl_t;
 
 enum dirent_states
 {
@@ -182,8 +180,9 @@ class fhandler_base
   size_t rabuflen;
 
   /* Used for advisory file locking.  See flock.cc.  */
-  long long unique_id;
+  int64_t unique_id;
   void del_my_locks (del_lock_called_from);
+  void set_ino (ino_t i) { ino = i; }
 
   HANDLE read_state;
 
@@ -289,8 +288,6 @@ class fhandler_base
   int get_readahead ();
   int peek_readahead (int queryput = 0);
 
-  int eat_readahead (int n);
-
   void set_readahead_valid (int val, int ch = -1);
 
   int get_readahead_into_buffer (char *buf, size_t buflen);
@@ -303,8 +300,10 @@ class fhandler_base
   const char *get_name () const { return pc.get_posix (); }
   const char *get_win32_name () { return pc.get_win32 (); }
   virtual dev_t get_dev () { return get_device (); }
+  /* Use get_plain_ino if the caller needs to avoid hashing if ino is 0. */
+  ino_t get_plain_ino () { return ino; }
   ino_t get_ino () { return ino ?: ino = hash_path_name (0, pc.get_nt_native_path ()); }
-  long long get_unique_id () const { return unique_id; }
+  int64_t get_unique_id () const { return unique_id; }
   /* Returns name used for /proc/<pid>/fd in buf. */
   virtual char *get_proc_fd_name (char *buf);
 
@@ -319,6 +318,7 @@ class fhandler_base
   int open_null (int flags);
   virtual int open (int, mode_t);
   virtual void open_setup (int flags);
+  void set_unique_id (int64_t u) { unique_id = u; }
   void set_unique_id () { NtAllocateLocallyUniqueId ((PLUID) &unique_id); }
 
   int close_with_arch ();
@@ -341,8 +341,7 @@ class fhandler_base
   void __reg2 stat_fixup (struct stat *buf);
   int __reg2 fstat_fs (struct stat *buf);
 private:
-  int __reg3 fstat_helper (struct stat *buf,
-			      DWORD nNumberOfLinks);
+  int __reg2 fstat_helper (struct stat *buf);
   int __reg2 fstat_by_nfs_ea (struct stat *buf);
   int __reg2 fstat_by_handle (struct stat *buf);
   int __reg2 fstat_by_name (struct stat *buf);
@@ -352,6 +351,8 @@ public:
   virtual int __reg1 fchmod (mode_t mode);
   virtual int __reg2 fchown (uid_t uid, gid_t gid);
   virtual int __reg3 facl (int, int, struct acl *);
+  virtual struct __acl_t * __reg2 acl_get (uint32_t);
+  virtual int __reg3 acl_set (struct __acl_t *, uint32_t);
   virtual ssize_t __reg3 fgetxattr (const char *, void *, size_t);
   virtual int __reg3 fsetxattr (const char *, const void *, size_t, int);
   virtual int __reg3 fadvise (off_t, off_t, int);
@@ -379,7 +380,7 @@ public:
   virtual int munmap (HANDLE h, caddr_t addr, size_t len);
   virtual int msync (HANDLE h, caddr_t addr, size_t len, int flags);
   virtual bool fixup_mmap_after_fork (HANDLE h, int prot, int flags,
-				      off_t offset, DWORD size,
+				      off_t offset, SIZE_T size,
 				      void *address);
 
   void *operator new (size_t, void *p) __attribute__ ((nothrow)) {return p;}
@@ -422,9 +423,9 @@ public:
   virtual select_record *select_except (select_stuff *);
   virtual const char *get_native_name ()
   {
-    return dev ().native;
+    return dev ().native ();
   }
-  virtual bg_check_types bg_check (int) {return bg_ok;}
+  virtual bg_check_types bg_check (int, bool = false) {return bg_ok;}
   void clear_readahead ()
   {
     raixput = raixget = ralen = rabuflen = 0;
@@ -732,13 +733,14 @@ public:
   int open (int flags, mode_t mode = 0);
   int dup (fhandler_base *child, int);
   int ioctl (unsigned int cmd, void *);
+  int __reg2 fstat (struct stat *buf);
   int __reg2 fstatvfs (struct statvfs *buf);
   int __reg3 fadvise (off_t, off_t, int);
   int __reg3 ftruncate (off_t, bool);
-  int init (HANDLE, DWORD, mode_t);
+  int init (HANDLE, DWORD, mode_t, int64_t);
   static int create (fhandler_pipe *[2], unsigned, int);
   static DWORD create (LPSECURITY_ATTRIBUTES, HANDLE *, HANDLE *, DWORD,
-		       const char *, DWORD);
+		       const char *, DWORD, int64_t *unique_id = NULL);
   fhandler_pipe (void *) {}
 
   void copyto (fhandler_base *x)
@@ -1007,6 +1009,8 @@ class fhandler_disk_file: public fhandler_base
   int __reg1 fchmod (mode_t mode);
   int __reg2 fchown (uid_t uid, gid_t gid);
   int __reg3 facl (int, int, struct acl *);
+  struct __acl_t * __reg2 acl_get (uint32_t);
+  int __reg3 acl_set (struct __acl_t *, uint32_t);
   ssize_t __reg3 fgetxattr (const char *, void *, size_t);
   int __reg3 fsetxattr (const char *, const void *, size_t, int);
   int __reg3 fadvise (off_t, off_t, int);
@@ -1019,7 +1023,7 @@ class fhandler_disk_file: public fhandler_base
   int munmap (HANDLE h, caddr_t addr, size_t len);
   int msync (HANDLE h, caddr_t addr, size_t len, int flags);
   bool fixup_mmap_after_fork (HANDLE h, int prot, int flags,
-			      off_t offset, DWORD size, void *address);
+			      off_t offset, SIZE_T size, void *address);
   int mkdir (mode_t mode);
   int rmdir ();
   DIR __reg2 *opendir (int fd);
@@ -1053,8 +1057,9 @@ class fhandler_disk_file: public fhandler_base
 
 class fhandler_dev: public fhandler_disk_file
 {
-  const struct device *devidx;
+  const struct _device *devidx;
   bool dir_exists;
+  int drive, part;
 public:
   fhandler_dev ();
   int open (int flags, mode_t mode);
@@ -1210,6 +1215,8 @@ class fhandler_termios: public fhandler_base
   int ioctl (int, void *);
   tty_min *_tc;
   tty *get_ttyp () {return (tty *) tc ();}
+  int eat_readahead (int n);
+
  public:
   tty_min*& tc () {return _tc;}
   fhandler_termios () :
@@ -1226,7 +1233,7 @@ class fhandler_termios: public fhandler_base
   void sigflush ();
   int tcgetpgrp ();
   int tcsetpgrp (int pid);
-  bg_check_types bg_check (int sig);
+  bg_check_types bg_check (int sig, bool dontsignal = false);
   virtual DWORD __acquire_output_mutex (const char *fn, int ln, DWORD ms) {return 1;}
   virtual void __release_output_mutex (const char *fn, int ln) {}
   void echo_erase (int force = 0);
@@ -1343,10 +1350,12 @@ class dev_console
   bool ext_mouse_mode15;
   bool use_focus;
   bool raw_win32_keyboard_mode;
+  char cons_rabuf[40];  // cannot get longer than char buf[40] in char_command
+  char *cons_rapoi;
 
   inline UINT get_console_cp ();
   DWORD con_to_str (char *d, int dlen, WCHAR w);
-  DWORD str_to_con (mbtowc_p, const char *, PWCHAR d, const char *s, DWORD sz);
+  DWORD str_to_con (mbtowc_p, PWCHAR d, const char *s, DWORD sz);
   void set_color (HANDLE);
   void set_default_attr ();
   int set_cl_x (cltype);
@@ -1440,6 +1449,11 @@ private:
   int init (HANDLE, DWORD, mode_t);
   bool mouse_aware (MOUSE_EVENT_RECORD& mouse_event);
   bool focus_aware () {return shared_console_info->con.use_focus;}
+  bool get_cons_readahead_valid ()
+  {
+    return shared_console_info->con.cons_rapoi != NULL &&
+      *shared_console_info->con.cons_rapoi;
+  }
 
   select_record *select_read (select_stuff *);
   select_record *select_write (select_stuff *);
@@ -1454,6 +1468,7 @@ private:
   bool set_unit ();
   static bool need_invisible ();
   static void free_console ();
+  static const char *get_nonascii_key (INPUT_RECORD& input_rec, char *);
 
   fhandler_console (void *) {}
 
@@ -1555,8 +1570,9 @@ class fhandler_pty_slave: public fhandler_pty_common
   void fixup_after_exec ();
 
   select_record *select_read (select_stuff *);
-  virtual char const *ttyname () { return pc.dev.name; }
+  virtual char const *ttyname () { return pc.dev.name (); }
   int __reg2 fstat (struct stat *buf);
+  int __reg3 facl (int, int, struct acl *);
   int __reg1 fchmod (mode_t mode);
   int __reg2 fchown (uid_t uid, gid_t gid);
 
@@ -1666,6 +1682,8 @@ class fhandler_dev_null: public fhandler_base
     copyto (fh);
     return fh;
   }
+
+  ssize_t __stdcall write (const void *ptr, size_t len);
 };
 
 class fhandler_dev_zero: public fhandler_base
@@ -1681,7 +1699,7 @@ class fhandler_dev_zero: public fhandler_base
   virtual int munmap (HANDLE h, caddr_t addr, size_t len);
   virtual int msync (HANDLE h, caddr_t addr, size_t len, int flags);
   virtual bool fixup_mmap_after_fork (HANDLE h, int prot, int flags,
-				      off_t offset, DWORD size,
+				      off_t offset, SIZE_T size,
 				      void *address);
 
   fhandler_dev_zero (void *) {}
@@ -1714,8 +1732,6 @@ class fhandler_dev_random: public fhandler_base
   ssize_t __stdcall write (const void *ptr, size_t len);
   void __reg3 read (void *ptr, size_t& len);
   off_t lseek (off_t, int) { return 0; }
-
-  static bool crypt_gen_random (void *ptr, size_t len);
 
   fhandler_dev_random () : fhandler_base () {}
   fhandler_dev_random (void *) {}

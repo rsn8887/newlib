@@ -1,8 +1,5 @@
 /* signal.h
 
-  Copyright 2003, 2004, 2005, 2006, 2007, 2008, 2010, 2011, 2012, 2013,
-  2015 Red Hat, Inc.
-
   This file is part of Cygwin.
 
   This software is a copyrighted work licensed under the terms of the
@@ -49,7 +46,7 @@ struct _fpstate
   __uint32_t padding[24];
 };
 
-struct __attribute__ ((aligned (16))) __mcontext
+struct __attribute__ ((__aligned__ (16))) __mcontext
 {
   __uint64_t p1home;
   __uint64_t p2home;
@@ -178,7 +175,10 @@ typedef struct sigevent
   pthread_attr_t *sigev_notify_attributes; /* notification attributes */
 } sigevent_t;
 
+#if __POSIX_VISIBLE >= 199309
+
 #pragma pack(push,4)
+
 struct _sigcommune
 {
   __uint32_t _si_code;
@@ -188,7 +188,7 @@ struct _sigcommune
   __extension__ union
   {
     int _si_fd;
-    void *_si_pipe_fhandler;
+    int64_t _si_pipe_unique_id;
     char *_si_str;
   };
 };
@@ -252,7 +252,10 @@ typedef struct
 #endif /*__INSIDE_CYGWIN__*/
   };
 } siginfo_t;
+
 #pragma pack(pop)
+
+#endif /* __POSIX_VISIBLE >= 199309 */
 
 enum
 {
@@ -262,8 +265,7 @@ enum
   SI_MESGQ,				/* sent by real time mesq state change
 					   (currently unimplemented) */
   SI_TIMER,				/* sent by timer expiration */
-  SI_QUEUE,				/* sent by sigqueue (currently
-					   unimplemented) */
+  SI_QUEUE,				/* sent by sigqueue */
   SI_KERNEL,				/* sent by system */
 
   ILL_ILLOPC,				/* illegal opcode */
@@ -315,22 +317,18 @@ enum
 #define SIGEV_NONE   SIGEV_NONE
 #define SIGEV_THREAD SIGEV_THREAD
 
-#if __WORDSIZE == 64
-typedef __uint64_t sigset_t;
-#else
-/* FIXME: We should probably raise the # of signals for 32 bit as well.
-          Unfortunately this is an ABI change so requires some forethought. */
-typedef __uint32_t sigset_t;
-#endif
-
 typedef void (*_sig_func_ptr)(int);
+
+#if __POSIX_VISIBLE
 
 struct sigaction
 {
   __extension__ union
   {
     _sig_func_ptr sa_handler;  		/* SIG_DFL, SIG_IGN, or pointer to a function */
+#if __POSIX_VISIBLE >= 199309
     void  (*sa_sigaction) ( int, siginfo_t *, void * );
+#endif
   };
   sigset_t sa_mask;
   int sa_flags;
@@ -355,10 +353,16 @@ struct sigaction
    Do not use.  */
 #define _SA_INTERNAL_MASK 0xf000	/* bits in this range are internal */
 
+#endif /* __POSIX_VISIBLE */
+
+#if __BSD_VISIBLE || __XSI_VISIBLE >= 4 || __POSIX_VISIBLE >= 200809
+
 #undef	MINSIGSTKSZ
 #define	MINSIGSTKSZ	 8192
 #undef	SIGSTKSZ
 #define	SIGSTKSZ	32768
+
+#endif /* __BSD_VISIBLE || __XSI_VISIBLE >= 4 || __POSIX_VISIBLE >= 200809 */
 
 #define	SIGHUP	1	/* hangup */
 #define	SIGINT	2	/* interrupt */
@@ -366,6 +370,7 @@ struct sigaction
 #define	SIGILL	4	/* illegal instruction (not reset when caught) */
 #define	SIGTRAP	5	/* trace trap (not reset when caught) */
 #define	SIGABRT 6	/* used by abort */
+#define	SIGIOT	SIGABRT	/* synonym for SIGABRT on most systems */
 #define	SIGEMT	7	/* EMT instruction */
 #define	SIGFPE	8	/* floating point exception */
 #define	SIGKILL	9	/* kill (cannot be caught or ignored) */
@@ -407,20 +412,32 @@ struct sigaction
 
 #define SIG_HOLD ((_sig_func_ptr)2)	/* Signal in signal mask */
 
+#if __POSIX_VISIBLE >= 200809
 void psiginfo (const siginfo_t *, const char *);
+#endif
+#if __POSIX_VISIBLE
 int sigwait (const sigset_t *, int *);
+#endif
+#if __POSIX_VISIBLE >= 199309
 int sigwaitinfo (const sigset_t *, siginfo_t *);
+#endif
+#if __XSI_VISIBLE >= 4
 int sighold (int);
 int sigignore (int);
 int sigrelse (int);
 _sig_func_ptr sigset (int, _sig_func_ptr);
+#endif
 
+#if __POSIX_VISIBLE >= 199309
 int sigqueue(pid_t, int, const union sigval);
+#endif
+#if __BSD_VISIBLE || __XSI_VISIBLE >= 4 || __POSIX_VISIBLE >= 200809
 int siginterrupt (int, int);
+#endif
 #ifdef __INSIDE_CYGWIN__
 extern const char *sys_sigabbrev[];
 extern const char *sys_siglist[];
-#else
+#elif __BSD_VISIBLE
 extern const char __declspec(dllimport) *sys_sigabbrev[];
 extern const char __declspec(dllimport) *sys_siglist[];
 #endif

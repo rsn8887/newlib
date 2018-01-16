@@ -1,8 +1,5 @@
 /* ntdll.h.  Contains ntdll specific stuff not defined elsewhere.
 
-   Copyright 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
-   2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
    This file is part of Cygwin.
 
    This software is a copyrighted work licensed under the terms of the
@@ -858,7 +855,7 @@ typedef struct _FILE_NETWORK_OPEN_INFORMATION
 /* Checked on 64 bit. */
 typedef struct _FILE_INTERNAL_INFORMATION
 {
-  LARGE_INTEGER FileId;
+  LARGE_INTEGER IndexNumber;
 } FILE_INTERNAL_INFORMATION, *PFILE_INTERNAL_INFORMATION;
 
 /* Checked on 64 bit. */
@@ -1162,7 +1159,8 @@ typedef enum _THREADINFOCLASS
 {
   ThreadBasicInformation = 0,
   ThreadTimes = 1,
-  ThreadImpersonationToken = 5
+  ThreadImpersonationToken = 5,
+  ThreadQuerySetWin32StartAddress = 9
 } THREADINFOCLASS, *PTHREADINFOCLASS;
 
 /* Checked on 64 bit. */
@@ -1451,6 +1449,7 @@ extern "C"
 					       PACL *, PBOOLEAN);
   NTSTATUS NTAPI RtlGetGroupSecurityDescriptor (PSECURITY_DESCRIPTOR, PSID *,
 						PBOOLEAN);
+  NTSTATUS NTAPI RtlGetNtVersionNumbers (LPDWORD, LPDWORD, LPDWORD);
   NTSTATUS NTAPI RtlGetOwnerSecurityDescriptor (PSECURITY_DESCRIPTOR, PSID *,
 						PBOOLEAN);
   NTSTATUS NTAPI RtlGetVersion (PRTL_OSVERSIONINFOEXW);

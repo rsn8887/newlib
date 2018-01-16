@@ -1,8 +1,5 @@
 /* smallprint.cc: small print routines for WIN32
 
-   Copyright 1996, 1998, 2000, 2001, 2002, 2003, 2005, 2006,
-	     2007, 2008, 2009, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -172,6 +169,7 @@ __small_vsprintf (char *dst, const char *fmt, va_list ap)
 		      pad = '0';
 		      continue;
 		    }
+		  /*FALLTHRU*/
 		case '1': case '2': case '3': case '4':
 		case '5': case '6': case '7': case '8': case '9':
 		  len = len * 10 + (c - '0');
@@ -195,8 +193,8 @@ __small_vsprintf (char *dst, const char *fmt, va_list ap)
 		case 'C':
 		  {
 		    WCHAR wc = (WCHAR) va_arg (ap, int);
-		    char buf[4], *c;
-		    sys_wcstombs (buf, 4, &wc, 1);
+		    char buf[MB_LEN_MAX+1] = "", *c;
+		    sys_wcstombs (buf, MB_LEN_MAX+1, &wc, 1);
 		    for (c = buf; *c; ++c)
 		      *dst++ = *c;
 		  }
@@ -287,6 +285,7 @@ gen_decimalLL:
 		  n = strtol (fmt, (char **) &fmt, 10);
 		  if (*fmt++ != 's')
 		    goto endfor;
+		  /*FALLTHRU*/
 		case 's':
 		  s = va_arg (ap, char *);
 		  if (s == NULL)
@@ -514,6 +513,7 @@ __small_vswprintf (PWCHAR dst, const WCHAR *fmt, va_list ap)
 		      pad = L'0';
 		      continue;
 		    }
+		  /*FALLTHRU*/
 		case L'1' ... L'9':
 		  len = len * 10 + (c - L'0');
 		  continue;
@@ -615,6 +615,7 @@ gen_decimalLL:
 		  n = wcstoul (fmt, (wchar_t **) &fmt, 10);
 		  if (*fmt++ != L's')
 		    goto endfor;
+		  /*FALLTHRU*/
 		case L's':
 		  s = va_arg (ap, char *);
 		  if (s == NULL)

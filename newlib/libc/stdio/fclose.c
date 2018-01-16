@@ -24,19 +24,10 @@ INDEX
 INDEX
 	_fclose_r
 
-ANSI_SYNOPSIS
+SYNOPSIS
 	#include <stdio.h>
 	int fclose(FILE *<[fp]>);
 	int _fclose_r(struct _reent *<[reent]>, FILE *<[fp]>);
-
-TRAD_SYNOPSIS
-	#include <stdio.h>
-	int fclose(<[fp]>)
-	FILE *<[fp]>;
-
-	int fclose(<[fp]>)
-        struct _reent *<[reent]>
-	FILE *<[fp]>;
 
 DESCRIPTION
 If the file or stream identified by <[fp]> is open, <<fclose>> closes
@@ -82,11 +73,13 @@ _DEFUN(_fclose_r, (rptr, fp),
   int __oldcancel;
   pthread_setcancelstate (PTHREAD_CANCEL_DISABLE, &__oldcancel);
 #endif
-  _flockfile (fp);
+  if (!(fp->_flags2 & __SNLK))
+    _flockfile (fp);
 
   if (fp->_flags == 0)		/* not open! */
     {
-      _funlockfile (fp);
+      if (!(fp->_flags2 & __SNLK))
+	_funlockfile (fp);
 #ifdef _STDIO_WITH_THREAD_CANCELLATION_SUPPORT
       pthread_setcancelstate (__oldcancel, &__oldcancel);
 #endif
@@ -111,7 +104,8 @@ _DEFUN(_fclose_r, (rptr, fp),
     FREELB (rptr, fp);
   __sfp_lock_acquire ();
   fp->_flags = 0;		/* release this FILE for reuse */
-  _funlockfile (fp);
+  if (!(fp->_flags2 & __SNLK))
+    _funlockfile (fp);
 #ifndef __SINGLE_THREAD__
   __lock_close_recursive (fp->_lock);
 #endif

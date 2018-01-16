@@ -60,7 +60,7 @@ INDEX
 INDEX
 	_vsscanf_r
 
-ANSI_SYNOPSIS
+SYNOPSIS
 	#include <stdio.h>
 	#include <stdarg.h>
 	int vscanf(const char *<[fmt]>, va_list <[list]>);
@@ -73,40 +73,6 @@ ANSI_SYNOPSIS
                        va_list <[list]>);
 	int _vsscanf_r(struct _reent *<[reent]>, const char *<[str]>,
                        const char *<[fmt]>, va_list <[list]>);
-
-TRAD_SYNOPSIS
-	#include <stdio.h>
-	#include <varargs.h>
-	int vscanf( <[fmt]>, <[ist]>)
-	char *<[fmt]>;
-	va_list <[list]>;
-
-	int vfscanf( <[fp]>, <[fmt]>, <[list]>)
-	FILE *<[fp]>;
-	char *<[fmt]>;
-	va_list <[list]>;
-
-	int vsscanf( <[str]>, <[fmt]>, <[list]>)
-	char *<[str]>;
-	char *<[fmt]>;
-	va_list <[list]>;
-
-	int _vscanf_r( <[reent]>, <[fmt]>, <[ist]>)
-	struct _reent *<[reent]>;
-	char *<[fmt]>;
-	va_list <[list]>;
-
-	int _vfscanf_r( <[reent]>, <[fp]>, <[fmt]>, <[list]>)
-	struct _reent *<[reent]>;
-	FILE *<[fp]>;
-	char *<[fmt]>;
-	va_list <[list]>;
-
-	int _vsscanf_r( <[reent]>, <[str]>, <[fmt]>, <[list]>)
-	struct _reent *<[reent]>;
-	char *<[str]>;
-	char *<[fmt]>;
-	va_list <[list]>;
 
 DESCRIPTION
 <<vscanf>>, <<vfscanf>>, and <<vsscanf>> are (respectively) variants
@@ -152,6 +118,15 @@ Supporting OS subroutines required:
 #include "local.h"
 #include "../stdlib/local.h"
 #include "nano-vfscanf_local.h"
+
+/* GCC PR 14577 at https://gcc.gnu.org/bugzilla/show_bug.cgi?id=14557 */
+#if __STDC_VERSION__ >= 201112L
+#define va_ptr(ap) _Generic(&(ap), va_list *: &(ap), default: (va_list *)(ap))
+#elif __GNUC__ >= 4
+#define va_ptr(ap) __builtin_choose_expr(__builtin_types_compatible_p(__typeof__(&(ap)), va_list *), &(ap), (va_list *)(ap))
+#else
+#define va_ptr(ap) (sizeof(ap) == sizeof(va_list) ? (va_list *)&(ap) : (va_list *)(ap))
+#endif
 
 #define VFSCANF vfscanf
 #define _VFSCANF_R _vfscanf_r
@@ -375,6 +350,7 @@ _DEFUN(__SVFSCANF_R, (rptr, fp, fmt0, ap),
 	case 'p':
 	  scan_data.flags |= POINTER;
 	case 'x':
+	case 'X':
 	  scan_data.flags |= PFXOK;
 	  scan_data.base = 16;
 	  goto number;
@@ -423,9 +399,9 @@ _DEFUN(__SVFSCANF_R, (rptr, fp, fmt0, ap),
 	  return EOF;
 
 #ifdef FLOATING_POINT
-	case 'e':
-	case 'f':
-	case 'g':
+	case 'e': case 'E':
+	case 'f': case 'F':
+	case 'g': case 'G':
 	  scan_data.code = CT_FLOAT;
 	  break;
 #endif
@@ -457,12 +433,12 @@ _DEFUN(__SVFSCANF_R, (rptr, fp, fmt0, ap),
 	}
       ret = 0;
       if (scan_data.code < CT_INT)
-	ret = _scanf_chars (rptr, &scan_data, fp, &ap);
+	ret = _scanf_chars (rptr, &scan_data, fp, va_ptr(ap));
       else if (scan_data.code < CT_FLOAT)
-	ret = _scanf_i (rptr, &scan_data, fp, &ap);
+	ret = _scanf_i (rptr, &scan_data, fp, va_ptr(ap));
 #ifdef FLOATING_POINT
       else if (_scanf_float)
-	ret = _scanf_float (rptr, &scan_data, fp, &ap);
+	ret = _scanf_float (rptr, &scan_data, fp, va_ptr(ap));
 #endif
 
       if (ret == MATCH_FAILURE)

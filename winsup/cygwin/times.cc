@@ -1,8 +1,5 @@
 /* times.cc
 
-   Copyright 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006,
-   2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -31,32 +28,12 @@ hires_ms NO_COPY gtod;
 
 hires_ns NO_COPY ntod;
 
-/* Temporary declare here until 32 bit w32api follows suit. */
-extern "C" { void WINAPI GetSystemTimePreciseAsFileTime (LPFILETIME); }
-
 static inline void __attribute__ ((always_inline))
 get_system_time (PLARGE_INTEGER systime)
 {
   wincap.has_precise_system_time ()
   	? GetSystemTimePreciseAsFileTime ((LPFILETIME) systime)
 	: GetSystemTimeAsFileTime ((LPFILETIME) systime);
-}
-
-/* There's no GetTickCount64 on pre-Vista.  This is the do-it-yourself kit,
-   as it was implemented as hires_ms::timeGetTime_ns once.  Resurrect the
-   functionality to allow reliable (albeit low res) timing values.  The
-   function returns the value in 100ns interval to avoid a division by 10000. */
-ULONGLONG
-GetTickCount_ns ()
-{
-  LARGE_INTEGER t;
-  do
-    {
-      t.HighPart = SharedUserData.InterruptTime.High1Time;
-      t.LowPart = SharedUserData.InterruptTime.LowPart;
-    }
-  while (t.HighPart != SharedUserData.InterruptTime.High2Time);
-  return (ULONGLONG) t.QuadPart;
 }
 
 /* Cygwin internal */
@@ -545,13 +522,14 @@ clock_gettime (clockid_t clk_id, struct timespec *tp)
 	pid = getpid ();
 
       pinfo p (pid);
-      if (!p->exists ())
+      if (!p || !p->exists ())
 	{
 	  set_errno (EINVAL);
 	  return -1;
 	}
 
-      hProcess = OpenProcess (PROCESS_QUERY_INFORMATION, 0, p->dwProcessId);
+      hProcess = OpenProcess (PROCESS_QUERY_LIMITED_INFORMATION, 0,
+			      p->dwProcessId);
       NtQueryInformationProcess (hProcess, ProcessTimes,
 				 &kut, sizeof kut, NULL);
 
@@ -573,7 +551,7 @@ clock_gettime (clockid_t clk_id, struct timespec *tp)
       if (thr_id == 0)
 	thr_id = pthread::self ()->getsequence_np ();
 
-      hThread = OpenThread (THREAD_QUERY_INFORMATION, 0, thr_id);
+      hThread = OpenThread (THREAD_QUERY_LIMITED_INFORMATION, 0, thr_id);
       if (!hThread)
 	{
 	  set_errno (EINVAL);
@@ -768,8 +746,12 @@ clock_setres (clockid_t clk_id, struct timespec *tp)
 extern "C" int
 clock_getcpuclockid (pid_t pid, clockid_t *clk_id)
 {
-  if (pid != 0 && !pinfo (pid)->exists ())
-    return (ESRCH);
+  if (pid != 0)
+    {
+      pinfo p (pid);
+      if (!p || !p->exists ())
+	return (ESRCH);
+    }
   *clk_id = (clockid_t) PID_TO_CLOCKID (pid);
   return 0;
 }

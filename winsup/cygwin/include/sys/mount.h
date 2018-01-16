@@ -1,8 +1,5 @@
 /* sys/mount.h
 
-   Copyright 1998, 1999, 2000, 2001, 2002, 2003, 2005, 2008, 2009, 2010, 2012,
-   2014 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -44,7 +41,8 @@ enum
   MOUNT_DOS =		0x40000,	/* convert leading spaces and trailing
 					   dots and spaces to private use area */
   MOUNT_IHASH =		0x80000,	/* Enforce hash values for inode numbers */
-  MOUNT_BIND =		0x100000	/* Allows bind syntax in fstab file. */
+  MOUNT_BIND =		0x100000,	/* Allows bind syntax in fstab file. */
+  MOUNT_USER_TEMP =	0x200000	/* Mount the user's $TMP. */
 };
 
 int mount (const char *, const char *, unsigned __flags);

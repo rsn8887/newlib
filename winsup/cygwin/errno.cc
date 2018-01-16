@@ -1,8 +1,5 @@
 /* errno.cc: errno-related functions
 
-   Copyright 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006,
-   2008, 2009, 2010, 2011, 2012, 2013, 2014 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -404,6 +401,13 @@ strerror (int errnum)
   if (error)
     set_errno (error);
   return result;
+}
+
+extern "C" char *
+strerror_l (int errnum, locale_t locale)
+{
+  /* We don't provide localized system error messages (yet?). */
+  return strerror (errnum);
 }
 
 /* Newlib's <string.h> provides declarations for two strerror_r

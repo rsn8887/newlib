@@ -1,7 +1,5 @@
 /* flock.cc.  NT specific implementation of advisory file locking.
 
-   Copyright 2003, 2008, 2009, 2010, 2011, 2012, 2013, 2014 Red Hat, Inc.
-
    This file is part of Cygwin.
 
    This software is a copyrighted work licensed under the terms of the
@@ -766,12 +764,12 @@ lockf_t::create_lock_obj ()
 {
   lockfattr_t attr;
   NTSTATUS status;
+  PSECURITY_DESCRIPTOR sd_buf = alloca (SD_MIN_SIZE);
   POBJECT_ATTRIBUTES lock_obj_attr;
 
-  lock_obj_attr = create_lock_obj_attr (&attr, OBJ_INHERIT,
-					alloca (SD_MIN_SIZE));
   do
     {
+      lock_obj_attr = create_lock_obj_attr (&attr, OBJ_INHERIT, sd_buf);
       status = NtCreateEvent (&lf_obj, CYG_EVENT_ACCESS, lock_obj_attr,
 			      NotificationEvent, FALSE);
       if (!NT_SUCCESS (status))
@@ -1300,7 +1298,7 @@ lf_setlock (lockf_t *lock, inode_t *node, lockf_t **clean, HANDLE fhdl)
 	timeout = 100L;
 
       DWORD WAIT_SIGNAL_ARRIVED = WAIT_OBJECT_0 + wait_count;
-      set_signal_arrived here (w4[wait_count++]);
+      wait_signal_arrived here (w4[wait_count++]);
 
       DWORD WAIT_THREAD_CANCELED = WAIT_TIMEOUT + 1;
       HANDLE cancel_event = pthread::get_cancel_event ();
@@ -1773,7 +1771,7 @@ flock (int fd, int operation)
 
   __try
     {
-      cygheap_fdget cfd (fd, true);
+      cygheap_fdget cfd (fd);
       if (cfd < 0)
 	__leave;
 
@@ -1817,7 +1815,7 @@ lockf (int filedes, int function, off_t size)
 
   __try
     {
-      cygheap_fdget cfd (filedes, true);
+      cygheap_fdget cfd (filedes);
       if (cfd < 0)
 	__leave;
 
@@ -2008,14 +2006,12 @@ fhandler_disk_file::mand_lock (int a_op, struct flock *fl)
 	      thr->detach ();
 	      break;
 	    default:
-	      /* Signal arrived. */
-	      /* Starting with Vista, CancelSynchronousIo works, and we wait
-		 for the thread to exit.  lp.status will be either
-		 STATUS_SUCCESS, or STATUS_CANCELLED.  We only call
-		 NtUnlockFile in the first case.
-		 Prior to Vista, CancelSynchronousIo doesn't exist, so we
-		 terminated the thread and always call NtUnlockFile since
-		 lp.status was 0 to begin with. */
+	      /* Signal arrived.
+		 If CancelSynchronousIo works we wait for the thread to exit.
+		 lp.status will be either STATUS_SUCCESS, or STATUS_CANCELLED.
+		 We only call NtUnlockFile in the first case.
+		 If CancelSynchronousIo fails we terminated the thread and
+		 call NtUnlockFile since lp.status was 0 to begin with. */
 	      if (CancelSynchronousIo (thr->thread_handle ()))
 		thr->detach ();
 	      else

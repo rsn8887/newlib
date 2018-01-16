@@ -1,8 +1,5 @@
 /* external.cc: Interface to Cygwin internals from external programs.
 
-   Copyright 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007,
-   2008, 2009, 2010, 2011, 2012, 2014 Red Hat, Inc.
-
    Written by Christopher Faylor <cgf@cygnus.com>
 
 This file is part of Cygwin.
@@ -245,7 +242,7 @@ cygwin_internal (cygwin_getinfo_types t, ...)
 	break;
 
       case CW_USER_DATA:
-#ifndef __x86_64__
+#ifdef __i386__
 	/* This is a kludge to work around a version of _cygwin_common_crt0
 	   which overwrote the cxx_malloc field with the local DLL copy.
 	   Hilarity ensues if the DLL is not loaded like while the process
@@ -342,7 +339,7 @@ cygwin_internal (cygwin_getinfo_types t, ...)
 	  size_t n;
 	  pid_t pid = va_arg (arg, pid_t);
 	  pinfo p (pid);
-	  res = (uintptr_t) p->cmdline (n);
+	  res = (uintptr_t) (p ? p->cmdline (n) : NULL);
 	}
 	break;
       case CW_CHECK_NTSEC:
@@ -699,6 +696,17 @@ cygwin_internal (cygwin_getinfo_types t, ...)
 		     sizeof(EXCEPTION_RECORD));
 	      res = 0;
 	    }
+	}
+	break;
+
+      case CW_CYGHEAP_PROFTHR_ALL:
+	{
+	  typedef void (*func_t) (HANDLE);
+	  extern void cygheap_profthr_all (func_t);
+
+	  func_t profthr_byhandle = va_arg(arg, func_t);
+	  cygheap_profthr_all (profthr_byhandle);
+	  res = 0;
 	}
 	break;
 

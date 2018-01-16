@@ -1,8 +1,5 @@
 /* fhandler_socket.cc. See fhandler.h for a description of the fhandler classes.
 
-   Copyright 2000, 2001, 2002, 2003, 2004, 2005, 2006, 2007, 2008, 2009, 2010,
-   2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
    This file is part of Cygwin.
 
    This software is a copyrighted work licensed under the terms of the
@@ -24,6 +21,7 @@
 #undef u_long
 #define u_long __ms_u_long
 #endif
+#include <ntsecapi.h>
 #include <ws2tcpip.h>
 #include <mswsock.h>
 #include <iphlpapi.h>
@@ -41,7 +39,7 @@
 #include "wininfo.h"
 #include <unistd.h>
 #include <sys/param.h>
-#include <sys/acl.h>
+#include <cygwin/acl.h>
 #include "cygtls.h"
 #include <sys/un.h>
 #include "ntdll.h"
@@ -250,7 +248,7 @@ fhandler_socket::~fhandler_socket ()
 char *
 fhandler_socket::get_proc_fd_name (char *buf)
 {
-  __small_sprintf (buf, "socket:[%lu]", get_socket ());
+  __small_sprintf (buf, "socket:[%lu]", get_plain_ino ());
   return buf;
 }
 
@@ -488,8 +486,7 @@ fhandler_socket::af_local_copy (fhandler_socket *sock)
 void
 fhandler_socket::af_local_set_secret (char *buf)
 {
-  if (!fhandler_dev_random::crypt_gen_random (connect_secret,
-					      sizeof (connect_secret)))
+  if (!RtlGenRandom (connect_secret, sizeof (connect_secret)))
     bzero ((char*) connect_secret, sizeof (connect_secret));
   __small_sprintf (buf, "%08x-%08x-%08x-%08x",
 		   connect_secret [0], connect_secret [1],
@@ -499,7 +496,7 @@ fhandler_socket::af_local_set_secret (char *buf)
 /* Maximum number of concurrently opened sockets from all Cygwin processes
    per session.  Note that shared sockets (through dup/fork/exec) are
    counted as one socket. */
-#define NUM_SOCKS       (32768 / sizeof (wsa_event))
+#define NUM_SOCKS       2048U
 
 #define LOCK_EVENTS	\
   if (wsock_mtx && \
@@ -594,6 +591,7 @@ fhandler_socket::init_events ()
 	InterlockedIncrement (&socket_serial_number);
       if (!new_serial_number)	/* 0 is reserved for global mutex */
 	InterlockedIncrement (&socket_serial_number);
+      set_ino (new_serial_number);
       RtlInitUnicodeString (&uname, sock_shared_name (name, new_serial_number));
       InitializeObjectAttributes (&attr, &uname, OBJ_INHERIT | OBJ_OPENIF,
 				  get_session_parent_dir (),
@@ -625,7 +623,14 @@ fhandler_socket::init_events ()
       NtClose (wsock_mtx);
       return false;
     }
-  wsock_events = search_wsa_event_slot (new_serial_number);
+  if (!(wsock_events = search_wsa_event_slot (new_serial_number)))
+    {
+      set_errno (ENOBUFS);
+      NtClose (wsock_evt);
+      NtClose (wsock_mtx);
+      return false;
+    }
+
   /* sock type not yet set here. */
   if (pc.dev == FH_UDP || pc.dev == FH_DGRAM)
     wsock_events->events = FD_WRITE;
@@ -746,7 +751,13 @@ fhandler_socket::wait_for_events (const long event_mask, const DWORD flags)
     return 0;
 
   int ret;
-  long events;
+  long events = 0;
+
+  WSAEVENT ev[3] = { wsock_evt, NULL, NULL };
+  wait_signal_arrived here (ev[1]);
+  DWORD ev_cnt = 2;
+  if ((ev[2] = pthread::get_cancel_event ()) != NULL)
+    ++ev_cnt;
 
   while (!(ret = evaluate_events (event_mask, events, !(flags & MSG_PEEK)))
 	 && !events)
@@ -757,14 +768,9 @@ fhandler_socket::wait_for_events (const long event_mask, const DWORD flags)
 	  return SOCKET_ERROR;
 	}
 
-      WSAEVENT ev[2] = { wsock_evt };
-      set_signal_arrived here (ev[1]);
-      switch (WSAWaitForMultipleEvents (2, ev, FALSE, 50, FALSE))
+      switch (WSAWaitForMultipleEvents (ev_cnt, ev, FALSE, 50, FALSE))
 	{
 	  case WSA_WAIT_TIMEOUT:
-	    pthread_testcancel ();
-	    break;
-
 	  case WSA_WAIT_EVENT_0:
 	    break;
 
@@ -774,8 +780,11 @@ fhandler_socket::wait_for_events (const long event_mask, const DWORD flags)
 	    WSASetLastError (WSAEINTR);
 	    return SOCKET_ERROR;
 
+	  case WSA_WAIT_EVENT_0 + 2:
+	    pthread::static_cancel_self ();
+	    break;
+
 	  default:
-	    pthread_testcancel ();
 	    /* wsock_evt can be NULL.  We're generating the same errno values
 	       as for sockets on which shutdown has been called. */
 	    if (WSAGetLastError () != WSA_INVALID_HANDLE)
@@ -792,14 +801,16 @@ fhandler_socket::wait_for_events (const long event_mask, const DWORD flags)
 void
 fhandler_socket::release_events ()
 {
-  HANDLE evt = wsock_evt;
-  HANDLE mtx = wsock_mtx;
+  if (WaitForSingleObject (wsock_mtx, INFINITE) != WAIT_FAILED)
+    {
+      HANDLE evt = wsock_evt;
+      HANDLE mtx = wsock_mtx;
 
-  LOCK_EVENTS;
-  wsock_evt = wsock_mtx = NULL;
-  } ReleaseMutex (mtx);	/* == UNLOCK_EVENTS, but note using local mtx here. */
-  NtClose (evt);
-  NtClose (mtx);
+      wsock_evt = wsock_mtx = NULL;
+      ReleaseMutex (mtx);
+      NtClose (evt);
+      NtClose (mtx);
+    }
 }
 
 /* Called from net.cc:fdsock() if a freshly created socket is not
@@ -933,8 +944,10 @@ fhandler_socket::fstat (struct stat *buf)
       res = fhandler_base::fstat (buf);
       if (!res)
 	{
-	  buf->st_dev = 0;
-	  buf->st_ino = (ino_t) ((uintptr_t) get_handle ());
+	  buf->st_dev = FHDEV (DEV_TCP_MAJOR, 0);
+	  if (!(buf->st_ino = get_plain_ino ()))
+	    sscanf (get_name (), "/proc/%*d/fd/socket:[%lld]",
+				 (long long *) &buf->st_ino);
 	  buf->st_mode = S_IFSOCK | S_IRWXU | S_IRWXG | S_IRWXO;
 	  buf->st_size = 0;
 	}
@@ -1065,10 +1078,10 @@ fhandler_socket::bind (const struct sockaddr *name, int namelen)
       sin.sin_port = ntohs (sin.sin_port);
       debug_printf ("AF_LOCAL: socket bound to port %u", sin.sin_port);
 
-      mode_t mode = adjust_socket_file_mode ((S_IRWXU | S_IRWXG | S_IRWXO)
-					     & ~cygheap->umask);
+      mode_t mode = S_IRUSR | S_IWUSR | S_IRGRP | S_IWGRP | S_IROTH | S_IWOTH;
       DWORD fattr = FILE_ATTRIBUTE_SYSTEM;
-      if (!(mode & (S_IWUSR | S_IWGRP | S_IWOTH)) && !pc.has_acls ())
+      if (!pc.has_acls ()
+	  && !(mode & ~cygheap->umask & (S_IWUSR | S_IWGRP | S_IWOTH)))
 	fattr |= FILE_ATTRIBUTE_READONLY;
       SECURITY_ATTRIBUTES sa = sec_none_nih;
       NTSTATUS status;
@@ -1086,7 +1099,7 @@ fhandler_socket::bind (const struct sockaddr *name, int namelen)
 	 I don't know what setting that is or how to recognize such a share,
 	 so for now we don't request WRITE_DAC on remote drives. */
       if (pc.has_acls () && !pc.isremote ())
-	access |= READ_CONTROL | WRITE_DAC;
+	access |= READ_CONTROL | WRITE_DAC | WRITE_OWNER;
 
       status = NtCreateFile (&fh, access, pc.get_object_attr (attr, sa), &io,
 			     NULL, fattr, 0, FILE_CREATE,
@@ -1104,8 +1117,7 @@ fhandler_socket::bind (const struct sockaddr *name, int namelen)
       else
 	{
 	  if (pc.has_acls ())
-	    set_file_attribute (fh, pc, ILLEGAL_UID, ILLEGAL_GID,
-				S_JUSTCREATED | mode);
+	    set_created_file_access (fh, pc, mode);
 	  char buf[sizeof (SOCKET_COOKIE) + 80];
 	  __small_sprintf (buf, "%s%u %c ", SOCKET_COOKIE, sin.sin_port,
 			   get_socket_type () == SOCK_STREAM ? 's'
@@ -1160,7 +1172,7 @@ int
 fhandler_socket::connect (const struct sockaddr *name, int namelen)
 {
   struct sockaddr_storage sst;
-  int type;
+  int type = 0;
 
   if (get_inet_addr (name, namelen, &sst, &namelen, &type, connect_secret)
       == SOCKET_ERROR)
@@ -1766,7 +1778,7 @@ inline ssize_t
 fhandler_socket::send_internal (struct _WSAMSG *wsamsg, int flags)
 {
   ssize_t res = 0;
-  DWORD ret = 0, err = 0, sum = 0;
+  DWORD ret = 0, sum = 0;
   WSABUF out_buf[wsamsg->dwBufferCount];
   bool use_sendmsg = false;
   DWORD wait_flags = flags & MSG_DONTWAIT;
@@ -1827,14 +1839,14 @@ fhandler_socket::send_internal (struct _WSAMSG *wsamsg, int flags)
 	    res = WSASendTo (get_socket (), wsamsg->lpBuffers,
 			     wsamsg->dwBufferCount, &ret, flags,
 			     wsamsg->name, wsamsg->namelen, NULL, NULL);
-	  if (res && (err = WSAGetLastError ()) == WSAEWOULDBLOCK)
+	  if (res && (WSAGetLastError () == WSAEWOULDBLOCK))
 	    {
 	      LOCK_EVENTS;
 	      wsock_events->events &= ~FD_WRITE;
 	      UNLOCK_EVENTS;
 	    }
 	}
-      while (res && err == WSAEWOULDBLOCK
+      while (res && (WSAGetLastError () == WSAEWOULDBLOCK)
 	     && !(res = wait_for_events (FD_WRITE | FD_CLOSE, wait_flags)));
 
       if (!res)
@@ -1848,7 +1860,7 @@ fhandler_socket::send_internal (struct _WSAMSG *wsamsg, int flags)
 	  if (get_socket_type () != SOCK_STREAM || ret < out_len)
 	    break;
 	}
-      else if (is_nonblocking () || err != WSAEWOULDBLOCK)
+      else if (is_nonblocking () || WSAGetLastError() != WSAEWOULDBLOCK)
 	break;
     }
 
@@ -1977,8 +1989,7 @@ fhandler_socket::sendmsg (const struct msghdr *msg, int flags)
     }
   /* Disappointing but true:  Even if WSASendMsg is supported, it's only
      supported for datagram and raw sockets. */
-  DWORD controllen = (DWORD) (!wincap.has_sendmsg ()
-			      || get_socket_type () == SOCK_STREAM
+  DWORD controllen = (DWORD) (get_socket_type () == SOCK_STREAM
 			      || get_addr_family () == AF_LOCAL
 			      ? 0 : msg->msg_controllen);
   WSAMSG wsamsg = { msg->msg_name ? (struct sockaddr *) &sst : NULL, len,
@@ -2243,7 +2254,7 @@ fhandler_socket::ioctl (unsigned int cmd, void *p)
        use a type of the expected size.  Hopefully. */
     case FIOASYNC:
 #ifdef __x86_64__
-    case _IOW('f', 125, unsigned long):
+    case _IOW('f', 125, u_long):
 #endif
       res = WSAAsyncSelect (get_socket (), winmsg, WM_ASYNCIO,
 	      *(int *) p ? ASYNC_MASK : 0);
@@ -2256,9 +2267,10 @@ fhandler_socket::ioctl (unsigned int cmd, void *p)
       break;
     case FIONREAD:
 #ifdef __x86_64__
-    case _IOR('f', 127, unsigned long):
+    case _IOR('f', 127, u_long):
 #endif
-      res = ioctlsocket (get_socket (), FIONREAD, (u_long *) p);
+      /* Make sure to use the Winsock definition of FIONREAD. */
+      res = ioctlsocket (get_socket (), _IOR('f', 127, u_long), (u_long *) p);
       if (res == SOCKET_ERROR)
 	set_winsock_errno ();
       break;

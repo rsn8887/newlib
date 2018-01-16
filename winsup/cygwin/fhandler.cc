@@ -1,8 +1,5 @@
 /* fhandler.cc.  See console.cc for fhandler_console functions.
 
-   Copyright 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005, 2006,
-   2007, 2008, 2009, 2010, 2011, 2012, 2013, 2014, 2015 Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -13,7 +10,7 @@ details. */
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/uio.h>
-#include <sys/acl.h>
+#include <cygwin/acl.h>
 #include <sys/param.h>
 #include "cygerrno.h"
 #include "perprocess.h"
@@ -114,26 +111,6 @@ fhandler_base::set_readahead_valid (int val, int ch)
 }
 
 int
-fhandler_base::eat_readahead (int n)
-{
-  int oralen = ralen;
-  if (n < 0)
-    n = ralen;
-  if (n > 0 && ralen)
-    {
-      if ((int) (ralen -= n) < 0)
-	ralen = 0;
-
-      if (raixget >= ralen)
-	raixget = raixput = ralen = 0;
-      else if (raixput > ralen)
-	raixput = ralen;
-    }
-
-  return oralen;
-}
-
-int
 fhandler_base::get_readahead_into_buffer (char *buf, size_t buflen)
 {
   int ch;
@@ -160,10 +137,15 @@ fhandler_base::set_name (path_conv &in_pc)
 
 char *fhandler_base::get_proc_fd_name (char *buf)
 {
+  /* If the file had been opened with O_TMPFILE | O_EXCL, don't
+     expose the filename.  linkat is supposed to return ENOENT in this
+     case.  See man 2 open on Linux. */
+  if ((get_flags () & (O_TMPFILE | O_EXCL)) == (O_TMPFILE | O_EXCL))
+    return strcpy (buf, "");
   if (get_name ())
     return strcpy (buf, get_name ());
-  if (dev ().name)
-    return strcpy (buf, dev ().name);
+  if (dev ().name ())
+    return strcpy (buf, dev ().name ());
   return strcpy (buf, "");
 }
 
@@ -463,7 +445,7 @@ fhandler_base::open_with_arch (int flags, mode_t mode)
 {
   int res;
   if (!(res = (archetype && archetype->io_handle)
-	|| open (flags, (mode & 07777) & ~cygheap->umask)))
+	|| open (flags, mode & 07777)))
     {
       if (archetype)
 	delete archetype;
@@ -605,7 +587,7 @@ fhandler_base::open (int flags, mode_t mode)
 
   /* Don't use the FILE_OVERWRITE{_IF} flags here.  See below for an
      explanation, why that's not such a good idea. */
-  if ((flags & O_EXCL) && (flags & O_CREAT))
+  if (((flags & O_EXCL) && (flags & O_CREAT)) || (flags & O_TMPFILE))
     create_disposition = FILE_CREATE;
   else
     create_disposition = (flags & O_CREAT) ? FILE_OPEN_IF : FILE_OPEN;
@@ -616,6 +598,18 @@ fhandler_base::open (int flags, mode_t mode)
 	 target, not the symlink.  This would break lstat. */
       if (pc.is_rep_symlink ())
 	options |= FILE_OPEN_REPARSE_POINT;
+
+      /* O_TMPFILE files are created with delete-on-close semantics, as well
+	 as with FILE_ATTRIBUTE_TEMPORARY.  The latter speeds up file access,
+	 because the OS tries to keep the file in memory as much as possible.
+	 In conjunction with FILE_DELETE_ON_CLOSE, ideally the OS never has
+	 to write to the disk at all. */
+      if (flags & O_TMPFILE)
+	{
+	  access |= DELETE;
+	  file_attributes |= FILE_ATTRIBUTE_TEMPORARY;
+	  options |= FILE_DELETE_ON_CLOSE;
+	}
 
       if (pc.fs_is_nfs ())
 	{
@@ -632,15 +626,7 @@ fhandler_base::open (int flags, mode_t mode)
 	    }
 	}
 
-      /* Trying to overwrite an already existing file with FILE_ATTRIBUTE_HIDDEN
-	 and/or FILE_ATTRIBUTE_SYSTEM attribute set, NtCreateFile fails with
-	 STATUS_ACCESS_DENIED.  Per MSDN you have to create the file with the
-	 same attributes as already specified for the file. */
-      if (create_disposition == FILE_CREATE
-	  && has_attribute (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))
-	file_attributes |= pc.file_attributes ();
-
-      if (flags & O_CREAT)
+      if (flags & (O_CREAT | O_TMPFILE))
 	{
 	  file_attributes |= FILE_ATTRIBUTE_NORMAL;
 
@@ -662,9 +648,10 @@ fhandler_base::open (int flags, mode_t mode)
 					     + p->EaNameLength + 1);
 	      memset (nfs_attr, 0, sizeof (fattr3));
 	      nfs_attr->type = NF3REG;
-	      nfs_attr->mode = mode;
+	      nfs_attr->mode = (mode & 07777) & ~cygheap->umask;
 	    }
-	  else if (!has_acls () && !(mode & (S_IWUSR | S_IWGRP | S_IWOTH)))
+	  else if (!has_acls ()
+		   && !(mode & ~cygheap->umask & (S_IWUSR | S_IWGRP | S_IWOTH)))
 	    /* If mode has no write bits set, and ACLs are not used, we set
 	       the DOS R/O attribute. */
 	    file_attributes |= FILE_ATTRIBUTE_READONLY;
@@ -716,7 +703,7 @@ fhandler_base::open (int flags, mode_t mode)
      This is the result of a discussion on the samba-technical list, starting at
      http://lists.samba.org/archive/samba-technical/2008-July/060247.html */
   if (io.Information == FILE_CREATED && has_acls ())
-    set_file_attribute (fh, pc, ILLEGAL_UID, ILLEGAL_GID, S_JUSTCREATED | mode);
+    set_created_file_access (fh, pc, mode);
 
   /* If you O_TRUNC a file on Linux, the data is truncated, but the EAs are
      preserved.  If you open a file on Windows with FILE_OVERWRITE{_IF} or
@@ -835,7 +822,7 @@ out:
 ssize_t __stdcall
 fhandler_base::write (const void *ptr, size_t len)
 {
-  int res;
+  ssize_t res;
 
   if (did_lseek ())
     {
@@ -1551,6 +1538,15 @@ fhandler_dev_null::fhandler_dev_null () :
 {
 }
 
+ssize_t __stdcall
+fhandler_dev_null::write (const void *ptr, size_t len)
+{
+  /* Shortcut.  This also fixes a problem with the NUL device on 64 bit:
+     If you write > 4 GB in a single attempt, the bytes written returned
+     from by is numBytes & 0xffffffff. */
+  return len;
+}
+
 void
 fhandler_base::set_no_inheritance (HANDLE &h, bool not_inheriting)
 {
@@ -1784,8 +1780,7 @@ fhandler_base::fadvise (off_t offset, off_t length, int advice)
 int
 fhandler_base::ftruncate (off_t length, bool allow_truncate)
 {
-  set_errno (EINVAL);
-  return -1;
+  return EINVAL;
 }
 
 int
@@ -1893,6 +1888,8 @@ fhandler_base::fpathconf (int v)
 	return pc.has_acls () || pc.fs_is_nfs ();
       set_errno (EINVAL);
       break;
+    case _PC_CASE_INSENSITIVE:
+      return !!pc.objcaseinsensitive ();
     default:
       set_errno (EINVAL);
       break;
@@ -2155,7 +2152,7 @@ fhandler_base_overlapped::raw_write (const void *ptr, size_t len)
 	    case overlapped_success:
 	      ptr = ((char *) ptr) + chunk;
 	      nbytes += nbytes_now;
-	      /* fall through intentionally */
+	      break;
 	    case overlapped_error:
 	      len = 0;		/* terminate loop */
 	    case overlapped_unknown:

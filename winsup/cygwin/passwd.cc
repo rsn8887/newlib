@@ -1,8 +1,5 @@
 /* passwd.cc: getpwnam () and friends
 
-   Copyright 1996, 1997, 1998, 2000, 2001, 2002, 2003, 2004, 2005, 2007, 2008,
-   2009, 2010, 2011, 2012, 2013, 2014, 2015  Red Hat, Inc.
-
 This file is part of Cygwin.
 
 This software is a copyrighted work licensed under the terms of the
@@ -41,8 +38,8 @@ pwdgrp::parse_passwd ()
   res.p.pw_dir =  next_str (':');
   res.p.pw_shell = next_str (':');
   cygsid csid;
-  csid.getfrompw_gecos (&res.p);
-  RtlCopySid (SECURITY_MAX_SID_SIZE, res.sid, csid);
+  if (csid.getfrompw_gecos (&res.p))
+    RtlCopySid (SECURITY_MAX_SID_SIZE, res.sid, csid);
   /* lptr points to the \0 after pw_shell.  Increment by one to get the correct
      required buffer len in getpw_cp. */
   res.len = lptr - res.p.pw_name + 1;
@@ -228,14 +225,14 @@ getpwuid32 (uid_t uid)
   return getpw_cp (temppw);
 }
 
-#ifdef __x86_64__
-EXPORT_ALIAS (getpwuid32, getpwuid)
-#else
+#ifdef __i386__
 extern "C" struct passwd *
 getpwuid (__uid16_t uid)
 {
   return getpwuid32 (uid16touid32 (uid));
 }
+#else
+EXPORT_ALIAS (getpwuid32, getpwuid)
 #endif
 
 extern "C" int
@@ -757,7 +754,7 @@ endpwent_filtered (void *pw)
   ((pw_ent *) pw)->endpwent ();
 }
 
-#ifndef __x86_64__
+#ifdef __i386__
 extern "C" struct passwd *
 getpwduid (__uid16_t)
 {
