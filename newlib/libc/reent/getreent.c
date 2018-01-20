@@ -19,5 +19,6 @@ _DEFUN_VOID(__getreent)
 {
   return _impure_ptr;
 }
+#endif
 
 #endif
